@@ -75,7 +75,11 @@ The tool under test is given **only DR and target addresses**; the "prod" contai
 Sizes are relative (S ≈ 1 week, M ≈ 2 weeks, L ≈ 3+ weeks for one engineer) and are for
 sequencing, not commitments.
 
-### M0 — Project skeleton and configuration (S)
+### M0 — Project skeleton and configuration (S) — ✅ done
+
+Delivered: `modules/config` (model, loader, validator with stable issue codes) and `modules/cli`
+(`validate-config`), CI workflow, 108 unit tests. Table specs gained declared `partition_key` /
+`sharding_key` fields so the masked-key checks run offline.
 
 Scope
 - Gradle multi-module build, version catalog, ktlint, warnings-as-errors, GitHub Actions CI. (detekt is deferred until a release supports Kotlin 2.4; the ClickHouse 25.8/26.8 matrix starts with the first integration tests in M2.)
