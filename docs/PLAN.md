@@ -1,6 +1,6 @@
 # clickhouse-repl — Implementation Plan
 
-Status: **Draft for review (rev 2)** · Companion to [SPEC.md](SPEC.md)
+Status: **In progress (rev 3)** · Companion to [SPEC.md](SPEC.md)
 
 This plan delivers the design in [SPEC.md](SPEC.md) in milestones that are each shippable
 and testable on their own. The order puts the **masking engine** and the **Source Guard** —
@@ -11,6 +11,8 @@ connects to the active production DC at any milestone.
 Rev 2: source is the passive DR DC only (3 shards × 1 replica, ReplicatedMergeTree);
 ClickHouse 25.8 and 26.8; static masking key in v1, Fortanix DSM later; shared target
 environments; no approval workflow; sharded-source support moved from M7 into M2.
+Rev 3: DR access storage is local; no external DC-role signal (failover flag + foreign-activity
+detection only).
 
 ---
 
@@ -76,8 +78,8 @@ sequencing, not commitments.
 ### M0 — Project skeleton and configuration (S)
 
 Scope
-- Gradle multi-module build, version catalog, ktlint/detekt, GitHub Actions CI with the 25.8/26.8 matrix.
-- `config` module: data model for all sections in SPEC §9.2, JSON Schema, YAML loading, `${file:…}` / `${env:…}` secret references.
+- Gradle multi-module build, version catalog, ktlint, warnings-as-errors, GitHub Actions CI. (detekt is deferred until a release supports Kotlin 2.4; the ClickHouse 25.8/26.8 matrix starts with the first integration tests in M2.)
+- `config` module: data model for all sections in SPEC §9.2, strict YAML binding (unknown fields and missing required fields are errors, reported with paths), `${file:…}` / `${env:…}` secret references. A JSON Schema for editor support is generated later, alongside the OpenAPI work in M4.
 - Semantic validation from SPEC §9.3 (offline parts): **active-DC deny-list (hosts + CIDRs, DNS resolution)**, `dc: dr` sources, policy completeness, partition-key-not-masked, sharding-key warning, domain references, key is a reference, guard/continuous sanity.
 - `cli validate-config <path>` with human-readable errors.
 - `docs/examples/replicator.yaml` validates in CI.
@@ -128,7 +130,7 @@ Scope
 - `deploy/dr-users.d/*.xml` and `deploy/dr-ddl.sql`: users, settings profile with constraints, quota, and **25.8 workload/resource DDL** (`CREATE RESOURCE` disk/cpu, `background` and `replication_reads` workloads, `merge_workload`/`mutation_workload` server settings). Verified against 25.8 and 26.8 images.
 - `validate-config --online`: DR `system.user_directories` is local (or XML provisioning is used), the L1 profile is in effect for `repl_reader`, schema matches on all shards.
 - DR signal collectors per host (SPEC §4.4): replication (delay, queue size/age, stuck entries, in-flight fetches, readonly/session), host (CPU, IO wait, memory), background (merges, mutations); direct per-host polling with timeouts; staleness → UNKNOWN.
-- **DC-role check** (SPEC §4.6): foreign-activity detection (`system.processes` users, `InsertQuery` deltas, `ignored_users`), operator failover flag, optional external endpoint; DR_ACTIVE state with manual clear.
+- **DC-role check** (SPEC §4.6): foreign-activity detection (`system.processes` users, `InsertQuery` deltas, `ignored_users`), operator failover flag; DR_ACTIVE state with manual clear. (No external role endpoint exists — rev 3.)
 - State machine GREEN/AMBER/RED/DR_ACTIVE/UNKNOWN with stable window and release ratio; per host and per cluster; `fail_closed_scope`.
 - Admission tokens (Postgres-leased; in-memory for CLI/dev), `per_host` and `global` concurrency.
 - Pre-emption: connection cancel + `KILL QUERY … ASYNC` backstop restricted to `repl_reader` and the chunk's `query_id`.
@@ -249,7 +251,7 @@ proceed in parallel after M4.
 |------|--------|------------|
 | Each DR shard has only one replica, shared with fetches/merges | Our reads slow DR replication → RPO grows | Replication-lag gating and pre-emption; concurrency 1 per host; workload scheduling favouring background work; M7 load test against the impact budget. |
 | DR access storage replicated via Keeper, or DDL run `ON CLUSTER` | Replication users appear on the active DC | Provision via `users.d` XML on DR nodes only; `validate-config --online` checks `system.user_directories`; runbook warning. |
-| Failover not detected (DR serves traffic but no foreign queries seen in a poll) | Reads on a now-active DC | Multiple triggers (foreign queries, `InsertQuery` deltas, operator flag in the failover runbook, optional external role signal); manual clear only. |
+| Failover not detected (DR serves traffic but no foreign queries seen in a poll) | Reads on a now-active DC | Failover flag is step 1 of the failover runbook; foreign queries and `InsertQuery` deltas as safety net; manual clear only. No external role signal exists. |
 | DNS change points a DR name at the active DC | Contact with active DC | Runtime DNS re-check against the CIDR deny-list; NetworkPolicy blocks egress regardless. |
 | Workload-scheduling syntax/behaviour differs between 25.8 and 26.8 | One fewer in-server safeguard | Version-specific DDL tested in the CI matrix; guard + L1 limits still apply. |
 | `force_index_by_date` not satisfiable for some tables | No server-side scan guard | Validation flags them; only small `full_copy` tables may relax it. |
@@ -263,7 +265,7 @@ proceed in parallel after M4.
 
 From SPEC §13.2:
 
-- **Before M3**: DR access storage type (Q2), monitoring users to ignore (Q3), external DC-role signal availability (Q4).
-- **Before M4/M6**: target topologies (Q10), notifications (Q9), retention on shared targets (Q8).
-- **Before M7**: impact-budget values and threshold sign-off (Q1), network path DR → targets (Q5), blackout windows (Q7).
-- **Before M8**: Fortanix wrap/unwrap vs exportable key, worker authentication (Q6).
+- **Before M3**: monitoring users to ignore (Q2).
+- **Before M4/M6**: target topologies (Q8), notifications (Q7), retention on shared targets (Q6).
+- **Before M7**: impact-budget values and threshold sign-off (Q1), network path DR → targets (Q3), blackout windows (Q5).
+- **Before M8**: Fortanix wrap/unwrap vs exportable key, worker authentication (Q4).

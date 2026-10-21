@@ -1,6 +1,6 @@
 # clickhouse-repl — Design Specification
 
-Status: **Draft for review (rev 2)** · Owner / sign-off: repository owner · Last updated: 2026-10-21
+Status: **Approved for implementation (rev 3)** · Owner / sign-off: repository owner · Last updated: 2026-10-21
 
 `clickhouse-repl` copies data from the production ClickHouse estate into one or more
 non-production ClickHouse environments (QA, UAT, perf). It masks sensitive columns
@@ -14,7 +14,7 @@ connecting to the active production datacentre, and protecting the DR side's own
 staying in sync and ready to take over — with a guard that defers to replication and
 stops immediately if DR becomes active.
 
-### Rev 2 changes (review answers incorporated)
+### Review decisions (rev 2 and rev 3)
 
 | Topic | Decision |
 |-------|----------|
@@ -25,6 +25,8 @@ stops immediately if DR becomes active.
 | Approvals | **None.** Self-service within quotas, since reads cannot reach production services. |
 | Targets | **Shared environments** (e.g. `qa1`, `uat`). No per-user/per-team namespaces. |
 | Thresholds & impact budget | Signed off by the repository owner. |
+| DR access storage (rev 3) | **Local** (`user_directories` has no replicated storage), so users can be provisioned with SQL on each DR node. |
+| DC-role signal (rev 3) | **No external endpoint.** DR_ACTIVE detection uses foreign activity on DR and the operator failover flag. |
 
 ---
 
@@ -186,10 +188,10 @@ the tool (`deploy/dr-users.d/*.xml` and `deploy/dr-ddl.sql`). The tool never run
 the source.
 
 > **Do not let these users or workloads reach the active DC.**
-> - If `user_directories` on DR includes `replicated` (Keeper-backed) access storage, a `CREATE USER` on a DR node is replicated to prod. In that case provision the users via `users.d` XML on DR nodes only (preferred anyway: managed by config management, not SQL).
+> - DR uses **local** access storage (confirmed), so the SQL below is safe when run on each DR node individually. Had `user_directories` included `replicated` (Keeper-backed) storage, a `CREATE USER` on a DR node would replicate to prod; the `users.d` XML variant stays in `deploy/` for config-management use.
 > - Never run this DDL `ON CLUSTER` — the cluster definition may include active-DC replicas.
 > - Workload/resource DDL is stored locally unless `workload_zookeeper_path` is configured; if it is, apply workload settings via DR-only server config instead.
-> - M3 includes a check (`validate-config --online`) that reads `system.user_directories` and refuses to proceed if replicated access storage is in use without the XML variant.
+> - M3 includes a check (`validate-config --online`) that reads `system.user_directories` and refuses to proceed if replicated access storage ever appears (e.g. after a config change on DR).
 
 Settings profile and quota (SQL form shown for readability; the XML form in `deploy/` is equivalent):
 
@@ -352,8 +354,12 @@ tokens and pre-empts all running chunks:
    inserts on DR; replicated parts arrive via fetches, which don't count as insert queries).
 2. **Failover flag**: `POST /api/v1/admin/failover` (operator/admin) — one step of the DC
    failover runbook. Persisted in Postgres.
-3. **External role check** (optional): an HTTP endpoint or DNS record that names the active
-   DC; if it names DR, or cannot be read while `required: true`, the state is DR_ACTIVE.
+
+There is no external, authoritative "active DC" signal in this deployment (rev 3), so
+detection rests on (1) and (2). Consequently **setting the failover flag is the first step
+of the DC failover runbook**, before traffic is moved; (1) is the safety net if that step is
+missed. An external role check can be added later as a third trigger if such a signal
+appears.
 
 Leaving DR_ACTIVE requires an operator to clear it (`POST /api/v1/admin/failover/clear`)
 after the DCs are back in their normal roles, followed by the usual `stable_window`. An
@@ -684,7 +690,7 @@ A complete, annotated example is in [`docs/examples/replicator.yaml`](examples/r
 | `targets` | Shared non-prod environments: hosts, cluster name, shard mapping, ZooKeeper path template, environment marker, table overrides. |
 | `guard` | Poll interval, thresholds, stable window, concurrency, blackout windows, pre-emption, circuit breaker. |
 | `masking` | Realm, key provider, domains (strategy + options), dictionaries. |
-| `tables` | Table specs: source, COB column, column policies, `mv_mode`, overrides, chunk sizing. |
+| `tables` | Table specs: source, COB column, declared `partition_key` / `sharding_key` expressions, column policies, `mv_mode`, overrides, chunk sizing. |
 | `datasets` | Named groups of tables. |
 | `continuous` | Continuous jobs: table, targets, mode, interval, SLO. |
 | `scheduling` | Queue weights and per-user concurrency caps. |
@@ -694,7 +700,7 @@ A complete, annotated example is in [`docs/examples/replicator.yaml`](examples/r
 
 - **Active-DC isolation**: every source host is declared under a source with `dc: dr`; no source or target host is listed in, or resolves (DNS, checked at load and every 5 min at runtime) into, `active_dc.hosts` / `active_dc.cidrs` — **hard error**, and at runtime a resolution into the deny-list stops all reads and alerts.
 - Every column of every table spec has a policy, or the table is `non_pii` with an approver.
-- No masked column appears in the partition key expression; masked sharding-key columns with `same_shards` produce a warning (§5.5).
+- No masked column appears in the declared `partition_key` expression; masked `sharding_key` columns with `same_shards` targets produce a warning (§5.5). The COB column must be `pass` and should appear in the partition key (warning otherwise). The online check compares the declared keys with DR.
 - Every table has a COB column or partition expression usable with `force_index_by_date` (or is `full_copy` with a size cap).
 - Domains referenced exist; `fpe_ff1` domains are explicitly approved.
 - Masking key is a reference (not a literal) and decodes to ≥ 256 bits.
@@ -756,7 +762,7 @@ A complete, annotated example is in [`docs/examples/replicator.yaml`](examples/r
 
 ## 13. Decisions and open questions
 
-### 13.1 Resolved (rev 2)
+### 13.1 Resolved
 
 | # | Question | Decision |
 |---|----------|----------|
@@ -767,16 +773,16 @@ A complete, annotated example is in [`docs/examples/replicator.yaml`](examples/r
 | 5 | Guard access to active DC | None. DR-only polling. |
 | 6 | Target namespaces | Shared environments only. |
 | 7 | Threshold / impact-budget sign-off | Repository owner. |
+| 8 | DR access storage (rev 3) | Local. SQL provisioning per DR node; never `ON CLUSTER`. |
+| 9 | External DC-role signal (rev 3) | None available. Failover flag is runbook step 1; foreign-activity detection as safety net. |
 
 ### 13.2 Still open
 
 1. **Impact budget values**: confirm B (proposed 5 s p99 increase in DR `absolute_delay`) and the default thresholds in §4.4.
-2. **DR access storage**: is `user_directories` on DR local, or replicated via Keeper? (Determines SQL vs `users.d` provisioning, §4.2.)
-3. **Monitoring users on DR** that must be listed in `ignored_users` so they don't trigger DR_ACTIVE.
-4. **External DC-role signal**: is there an authoritative endpoint/DNS record naming the active DC that the guard can read?
-5. **Network path DR → non-prod targets**: bandwidth available, any cross-DC links that must not be saturated (affects `max_network_bandwidth_for_user`).
-6. **Fortanix DSM**: wrap/unwrap (non-exportable KEK) vs exportable HMAC key; authentication method for workers.
-7. **Blackout windows**: DR drill schedule, month-end windows.
-8. **Retention** of copied data on shared targets.
-9. **Notifications**: portal only, or also email/Slack.
-10. **Target topology**: shard counts of `qa1`, `uat`, etc. (drives `shard_mapping`).
+2. **Monitoring users on DR** that must be listed in `ignored_users` so they don't trigger DR_ACTIVE.
+3. **Network path DR → non-prod targets**: bandwidth available, any cross-DC links that must not be saturated (affects `max_network_bandwidth_for_user`).
+4. **Fortanix DSM**: wrap/unwrap (non-exportable KEK) vs exportable HMAC key; authentication method for workers.
+5. **Blackout windows**: DR drill schedule, month-end windows.
+6. **Retention** of copied data on shared targets.
+7. **Notifications**: portal only, or also email/Slack.
+8. **Target topology**: shard counts of `qa1`, `uat`, etc. (drives `shard_mapping`).

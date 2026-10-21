@@ -44,12 +44,8 @@ sources:
     fail_closed_scope: cluster               # cluster | shard: one UNKNOWN host stops all reads (default) or just its shard
     dc_role_check:                           # SPEC §4.6 — any trigger => DR_ACTIVE
       foreign_activity: true                 # non-repl_* queries or InsertQuery deltas on DR hosts
-      ignored_users: [monitoring]            # legitimate read-only users on DR (open question §13.2-3)
-      external:
-        enabled: false
-        url: https://dc-role.internal/api/active-dc   # must return "dc-prod" while DR is passive
-        expect_active: dc-prod
-        required: false                      # true => unreadable endpoint also means DR_ACTIVE
+      ignored_users: [monitoring]            # legitimate read-only users on DR (open question §13.2-2)
+      # No external role endpoint exists; the operator failover flag (runbook step 1) is the other trigger.
 
 # ---------------------------------------------------------------------------
 # Targets: shared non-production environments.
@@ -185,7 +181,9 @@ masking:
 # ---------------------------------------------------------------------------
 tables:
   - source: trading.trades
-    cob_column: trade_date                   # partition key is toYYYYMM(trade_date)
+    cob_column: trade_date
+    partition_key: toYYYYMM(trade_date)      # declared; compared with DR by validate-config --online (M3)
+    sharding_key: cityHash64(trade_id)
     mv_mode: base_only
     chunk: { max_bytes: 2GiB, max_seconds: 120 }
     columns:
@@ -209,6 +207,8 @@ tables:
 
   - source: trading.positions
     cob_column: cob_date
+    partition_key: toYYYYMM(cob_date)
+    sharding_key: cityHash64(instrument_id)
     mv_mode: base_only
     columns:
       cob_date:       pass
