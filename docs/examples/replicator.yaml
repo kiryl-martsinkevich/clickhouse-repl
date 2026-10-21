@@ -1,63 +1,90 @@
 # clickhouse-repl — example configuration (annotated).
 # See docs/SPEC.md §9 for the schema and validation rules.
-# Secrets are always references: ${vault:<path>#<key>} or ${env:<NAME>}.
+# Secrets are always references: ${file:<path>}, ${env:<NAME>} (later: ${fortanix:<key-id>}).
 
 version: 1
 
 # ---------------------------------------------------------------------------
-# Production (source) clusters. Only ever read.
+# Active production DC: the tool must NEVER contact these (SPEC §1.3, §9.3).
+# Any source or target host listed here, or resolving into these CIDRs, is a
+# hard validation error; a runtime DNS re-resolution into them stops all reads.
+# ---------------------------------------------------------------------------
+active_dc:
+  name: dc-prod
+  hosts:
+    - ch-prod-s1.dc-prod.internal
+    - ch-prod-s2.dc-prod.internal
+    - ch-prod-s3.dc-prod.internal
+  cidrs:
+    - 10.10.0.0/16
+
+# ---------------------------------------------------------------------------
+# Source: the passive DR cluster (3 shards x 1 replica, ReplicatedMergeTree
+# replicas of prod). Only ever read.
 # ---------------------------------------------------------------------------
 sources:
-  prod:
-    cluster_name: prod
+  dr:
+    dc: dr                                   # required; only dc: dr sources are allowed
+    cluster_name: dr
+    clickhouse_version: "25.8"
     tls: true
     reader:                                  # L1-limited read-only user (SPEC §4.2)
       user: repl_reader
-      password: ${vault:secret/chrepl/prod#reader_password}
-    guard:                                   # system-tables + KILL own-user queries
+      password: ${file:/var/run/secrets/chrepl/dr-reader-password}
+    guard:                                   # system tables + KILL own-user queries
       user: repl_guard
-      password: ${vault:secret/chrepl/prod#guard_password}
-    shards:
+      password: ${file:/var/run/secrets/chrepl/dr-guard-password}
+    shards:                                  # the single DR replica of each shard is both read and watch host
       - name: s1
-        read_replicas: [ch-prod-s1-r3.internal:8443]   # dedicated, out of the prod LB (preferred)
-        watch_hosts:   [ch-prod-s1-r1.internal:8443, ch-prod-s1-r2.internal:8443, ch-prod-s1-r3.internal:8443]
+        host: ch-dr-s1.dc-dr.internal:8443
       - name: s2
-        read_replicas: [ch-prod-s2-r3.internal:8443]
-        watch_hosts:   [ch-prod-s2-r1.internal:8443, ch-prod-s2-r2.internal:8443, ch-prod-s2-r3.internal:8443]
-    max_replica_delay: 30s                   # skip a read replica lagging more than this
+        host: ch-dr-s2.dc-dr.internal:8443
+      - name: s3
+        host: ch-dr-s3.dc-dr.internal:8443
+    fail_closed_scope: cluster               # cluster | shard: one UNKNOWN host stops all reads (default) or just its shard
+    dc_role_check:                           # SPEC §4.6 — any trigger => DR_ACTIVE
+      foreign_activity: true                 # non-repl_* queries or InsertQuery deltas on DR hosts
+      ignored_users: [monitoring]            # legitimate read-only users on DR (open question §13.2-3)
+      external:
+        enabled: false
+        url: https://dc-role.internal/api/active-dc   # must return "dc-prod" while DR is passive
+        expect_active: dc-prod
+        required: false                      # true => unreadable endpoint also means DR_ACTIVE
 
 # ---------------------------------------------------------------------------
-# Non-production (target) clusters.
+# Targets: shared non-production environments.
 # ---------------------------------------------------------------------------
 targets:
   qa1:
-    hosts: [ch-qa1-01.internal:8443, ch-qa1-02.internal:8443]
+    hosts: [ch-qa1-s1.nonprod.internal:8443, ch-qa1-s2.nonprod.internal:8443, ch-qa1-s3.nonprod.internal:8443]
     cluster_name: qa1
+    shards: 3
+    shard_mapping: same_shards               # same_shards | distributed | single (SPEC §5.5)
     tls: true
     writer:
       user: repl_writer
-      password: ${vault:secret/chrepl/qa1#writer_password}
+      password: ${file:/var/run/secrets/chrepl/qa1-writer-password}
     environment_marker: qa1                  # must equal SELECT value FROM repl_meta.environment
     zookeeper_path_template: /clickhouse/qa1/tables/{shard}/{database}/{table}
-    shard_mapping: distributed               # same_shards | distributed | single
-    database_template: "{database}"          # e.g. "{database}_{team}" for per-team namespaces
+    recent_copy_warning: 24h                 # warn before replacing a slice someone else copied recently
     table_overrides:
       ttl: "cob_date + INTERVAL 90 DAY"      # applied where the table has cob_date; keeps QA small
       storage_policy: default
   uat:
-    hosts: [ch-uat-01.internal:8443]
+    hosts: [ch-uat-01.nonprod.internal:8443]
     cluster_name: uat
+    shards: 1
+    shard_mapping: single
     tls: true
     writer:
       user: repl_writer
-      password: ${vault:secret/chrepl/uat#writer_password}
+      password: ${file:/var/run/secrets/chrepl/uat-writer-password}
     environment_marker: uat
     zookeeper_path_template: /clickhouse/uat/tables/{shard}/{database}/{table}
-    shard_mapping: single
-    database_template: "{database}"
+    recent_copy_warning: 24h
 
 # ---------------------------------------------------------------------------
-# Prod Guard (SPEC §4). Thresholds apply per watched host unless noted.
+# Source Guard (SPEC §4). Thresholds apply per DR host.
 # ---------------------------------------------------------------------------
 guard:
   poll_interval: 5s
@@ -65,33 +92,33 @@ guard:
   stable_window: 60s                         # continuous GREEN samples needed to admit chunks
   release_ratio: 0.8                         # leave RED only when below 80% of thresholds
   thresholds:
-    foreign_query:                           # any single non-repl_* query exceeding one of these blocks
-      max_elapsed: 300s
-      max_memory: 20GiB
-      max_read_rows: 5000000000
-    max_foreign_queries: 50
-    max_cpu_utilisation: 0.60
-    max_load_avg_per_core: 0.70
-    max_memory_ratio: 0.70
-    max_active_merges: 20
-    max_mutation_bytes: 100GiB
-    max_replication_queue: 100
-    max_replica_delay: 30s
-    max_delayed_inserts: 0
+    replication:
+      max_replica_delay: 30s                 # system.replicas.absolute_delay
+      max_queue_size: 50
+      max_queue_oldest_age: 120s
+      max_stuck_entries: 0                   # num_tries > 3 or last_exception set
+      max_inflight_fetches: 4
+      block_on_readonly: true                # is_readonly / is_session_expired
+    host:
+      max_cpu_utilisation: 0.50
+      max_io_wait: 0.20
+      max_memory_ratio: 0.60
+    background:
+      max_active_merges: 10
+      max_mutation_bytes: 50GiB
   concurrency:
-    global: 2                                # concurrent chunk reads across the cluster
-    per_host: 1
+    global: 2                                # concurrent chunk reads across the DR cluster
+    per_host: 1                              # each DR replica is the only copy of its shard in DR
   preemption:
-    enabled: true                            # cannot be disabled in prod configs (validation)
-    kill_grace: 5s
+    kill_grace: 5s                           # preemption cannot be disabled (validation)
   circuit_breaker:
     max_preemptions: 5
     within: 30m
     open_for: 1h
   blackout_windows:
-    - name: eod-batch
-      cron: "0 17 * * 1-5"                   # 17:00 Mon–Fri, cluster timezone
-      duration: 5h
+    - name: dr-drill
+      cron: "0 8 1 */3 *"                    # quarterly DR drill (example)
+      duration: 12h
       timezone: Europe/London
     - name: month-end
       cron: "0 0 L * *"
@@ -104,17 +131,25 @@ guard:
 masking:
   realm: nonprod                             # all targets in this realm see identical masked values
   key:
-    ref: ${vault:transit/chrepl/nonprod}     # versioned master key; workers fetch at start-up
-    version: 3
+    provider: static                         # v1
+    ref: ${file:/var/run/secrets/chrepl/masking-key-v1}   # >= 256-bit, hex or base64; never a literal
+    version: 1
+    # Later (Fortanix DSM, BYOK; same key material + same version => identical masked values):
+    # provider: fortanix
+    # endpoint: https://dsm.internal
+    # kek_id: chrepl-nonprod-kek
+    # wrapped_key: ${file:/var/run/secrets/chrepl/masking-key-v1.wrapped}
+    # auth: { api_key: ${file:/var/run/secrets/chrepl/dsm-api-key} }
+    # version: 1
   dictionaries:
-    first_names:  { file: dictionaries/first_names_v1.txt }
-    last_names:   { file: dictionaries/last_names_v1.txt }
+    first_names:   { file: dictionaries/first_names_v1.txt }
+    last_names:    { file: dictionaries/last_names_v1.txt }
     company_names: { file: dictionaries/company_names_v2.txt }
   domains:
     customer_id:
       strategy: fpe_ff1                      # bijective: stays unique (used as a key)
       alphabet: digits
-      approved_by: security-team             # required for fpe_ff1
+      approved_by: repo-owner                # required for fpe_ff1
     account_number:
       strategy: tokenize
       normalise: [trim]
@@ -206,7 +241,7 @@ tables:
     full_copy: true
     max_full_copy_bytes: 2GiB
     classification: non_pii
-    approved_by: data-governance (JIRA DG-142)
+    approved_by: repo-owner
     unlisted_columns: pass
 
 # ---------------------------------------------------------------------------
@@ -252,7 +287,8 @@ continuous:
     timezone: Europe/London
 
 # ---------------------------------------------------------------------------
-# Access control and quotas (SPEC §7.4). Groups come from OIDC claims.
+# Scheduling, access control and quotas (SPEC §7.3, §7.4). Groups come from OIDC claims.
+# No approval workflow: requests within quota run automatically.
 # ---------------------------------------------------------------------------
 scheduling:
   queue_weights: { continuous: 3, adhoc: 1 }
@@ -277,5 +313,7 @@ access:
       max_bytes_per_day: 1TiB
       max_cob_dates_per_job: 31
       max_concurrent_jobs: 4
+  - group: data-platform-ops
+    role: operator
   - group: data-platform
     role: admin

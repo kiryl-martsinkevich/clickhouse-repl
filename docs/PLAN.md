@@ -1,12 +1,16 @@
 # clickhouse-repl — Implementation Plan
 
-Status: **Draft for review** · Companion to [SPEC.md](SPEC.md)
+Status: **Draft for review (rev 2)** · Companion to [SPEC.md](SPEC.md)
 
-This plan delivers the design in [SPEC.md](SPEC.md) in milestones that are each
-shippable and testable on their own. The order puts the **masking engine** and the
-**Prod Guard** — the two parts that protect data and production — ahead of
-convenience features, and nothing reads real production data until the guard
-milestone (M3) has passed its tests.
+This plan delivers the design in [SPEC.md](SPEC.md) in milestones that are each shippable
+and testable on their own. The order puts the **masking engine** and the **Source Guard** —
+the parts that protect data and production — ahead of convenience features, and nothing
+reads real DR data until the guard milestone (M3) has passed its tests. The tool never
+connects to the active production DC at any milestone.
+
+Rev 2: source is the passive DR DC only (3 shards × 1 replica, ReplicatedMergeTree);
+ClickHouse 25.8 and 26.8; static masking key in v1, Fortanix DSM later; shared target
+environments; no approval workflow; sharded-source support moved from M7 into M2.
 
 ---
 
@@ -18,34 +22,49 @@ Gradle (Kotlin DSL) multi-module build, JDK 21, Kotlin 2.x.
 clickhouse-repl/
 ├── build.gradle.kts / settings.gradle.kts / gradle/libs.versions.toml
 ├── modules/
-│   ├── config/          # YAML model, JSON Schema, semantic validation, secret resolution
-│   ├── masking/         # strategies, key derivation, type codecs, policy completeness checks
+│   ├── config/          # YAML model, JSON Schema, semantic validation (incl. active-DC deny-list), secret refs
+│   ├── masking/         # strategies, key providers (static; fortanix later), HKDF, type codecs, policy checks
 │   ├── clickhouse/      # client-v2 wrapper: streaming read/insert, settings, query_id, schema introspection
-│   ├── guard/           # signal collectors, state machine, tokens, pre-emption, blackout, circuit breaker
-│   ├── transfer/        # schema sync, chunk planner, read→mask→staging→REPLACE pipeline, janitor
-│   ├── jobs/            # Postgres job/chunk store, SKIP LOCKED queue, leases, scheduler, audit
+│   ├── guard/           # DR signal collectors, DC-role check, state machine, tokens, pre-emption, blackout, breaker
+│   ├── transfer/        # schema sync, per-shard chunk planner, read→mask→staging→REPLACE, shard mapping, janitor
+│   ├── jobs/            # Postgres job/chunk store, SKIP LOCKED queue, leases, scheduler, last-copied registry, audit
 │   ├── app/             # Spring Boot app: REST API, OIDC/RBAC, roles (api|scheduler|guard|worker|all)
 │   ├── cli/             # validate-config, dry-run, submit/status/cancel (REST client)
-│   └── it/              # integration tests (Testcontainers: ClickHouse "prod" + "target", Postgres)
+│   └── it/              # integration tests (Testcontainers topology below)
 ├── portal/              # React + TypeScript + Vite SPA (built into app's static resources)
 ├── deploy/
-│   ├── prod-ddl.sql     # users, profiles, quotas, workloads for prod (applied by DBAs)
+│   ├── dr-users.d/      # repl_reader / repl_guard users, profile, quota as XML (DR nodes only)
+│   ├── dr-ddl.sql       # same in SQL (only for local access storage) + workload/resource DDL
 │   ├── target-ddl.sql   # repl_writer, repl_meta.* on targets
-│   └── helm/            # chart: api/scheduler/guard (2 replicas), workers (N)
+│   └── helm/            # chart: api/scheduler/guard (2 replicas), workers (N), egress NetworkPolicy
 └── docs/                # SPEC.md, PLAN.md, examples/, runbook.md (M7)
 ```
 
 Module dependencies flow one way: `config` ← `masking` ← `transfer` → `clickhouse`,
-`guard` → `clickhouse`, `jobs` → `config`, `app` → everything. `masking` and `guard`
-have no Spring dependency, so they are unit-testable in isolation.
+`guard` → `clickhouse`, `jobs` → `config`, `app` → everything. `masking` and `guard` have no
+Spring dependency, so they are unit-testable in isolation.
+
+### 1.1 Integration-test topology
+
+Testcontainers, parameterised over **ClickHouse 25.8 and 26.8** (CI matrix):
+
+- **Keeper** container.
+- **"prod"** and **"DR"** ClickHouse containers holding `ReplicatedMergeTree` replicas of the same tables via that Keeper — 1 shard for most tests, a 3-shard × 2-replica variant (7 containers) for sharding tests in a nightly job.
+- **Target** ClickHouse container(s): 1-shard and 3-shard variants.
+- **Postgres**.
+- A **load generator** that inserts into / mutates "prod" to create replication backlog on "DR", and can impersonate a foreign user on "DR" (failover simulation).
+
+The tool under test is given **only DR and target addresses**; the "prod" container is listed in
+`active_dc`.
 
 ## 2. Cross-cutting rules (apply to every milestone)
 
-- **No test, demo, or CI job ever connects to a real production cluster.** Integration tests use two ClickHouse Testcontainers labelled `prod` and `target`.
-- Every prod query is built in one place (`clickhouse` module `ProdQueryBuilder`) that always attaches the `query_id`, the L1-compatible settings, and the `_partition_id` predicate. A unit test fails if any other code path issues `SELECT` against a source.
+- **Never connect to the active DC.** Config validation rejects active-DC hosts/CIDRs; the Helm chart's NetworkPolicy allows egress only to DR hosts, targets, Postgres, OIDC and the key store; every IT asserts the "prod" container's `system.query_log` contains no `repl_*` user.
+- **No test, demo or CI job ever connects to real production or DR clusters.**
+- Every source query is built in one place (`clickhouse` module `SourceQueryBuilder`) that always attaches the `query_id`, the L1-compatible settings, and the `_partition_id` predicate. A unit test fails if any other code path issues `SELECT` against a source.
 - Fail-closed defaults: unknown → deny, in config validation, masking policy lookup and the guard.
-- Every PR: `./gradlew check` (ktlint, detekt, unit tests), integration tests on main, portal `npm run lint && npm test`.
-- Security review sign-off required at the end of M1 (masking) and M3 (guard).
+- Every PR: `./gradlew check` (ktlint, detekt, unit tests), integration tests on main (25.8 + 26.8), portal `npm run lint && npm test`.
+- Security review sign-off at the end of M1 (masking) and M3 (guard); thresholds and impact budget signed off by the repository owner.
 
 ---
 
@@ -57,140 +76,159 @@ sequencing, not commitments.
 ### M0 — Project skeleton and configuration (S)
 
 Scope
-- Gradle multi-module build, version catalog, ktlint/detekt, GitHub Actions CI.
-- `config` module: Kotlin data model for all sections in SPEC §9.2, JSON Schema, YAML loading, `${vault:…}`/`${env:…}` secret references (Vault client behind an interface; env-only implementation for dev).
-- Semantic validation from SPEC §9.3 (except online schema checks): policy completeness, partition-key-not-masked (offline: declared), target ≠ prod host deny-list, domain references, guard/continuous sanity.
+- Gradle multi-module build, version catalog, ktlint/detekt, GitHub Actions CI with the 25.8/26.8 matrix.
+- `config` module: data model for all sections in SPEC §9.2, JSON Schema, YAML loading, `${file:…}` / `${env:…}` secret references.
+- Semantic validation from SPEC §9.3 (offline parts): **active-DC deny-list (hosts + CIDRs, DNS resolution)**, `dc: dr` sources, policy completeness, partition-key-not-masked, sharding-key warning, domain references, key is a reference, guard/continuous sanity.
 - `cli validate-config <path>` with human-readable errors.
 - `docs/examples/replicator.yaml` validates in CI.
 
 Exit criteria
-- Example config validates; a table of negative fixtures (missing column policy, masked partition key, target host = prod host, unknown domain, preemption disabled) each fails with the expected error.
+- Example config validates.
+- Negative fixtures each fail with the expected error: missing column policy, masked partition key, source host in `active_dc.hosts`, target host resolving into `active_dc.cidrs`, source without `dc: dr`, literal masking key, unknown domain, pre-emption disabled.
 
 ### M1 — Masking engine (M)
 
 Scope
-- Key handling: master key provider interface (Vault Transit/KV, KMS, local file for tests), HKDF per (realm, version, domain), keys zeroed on shutdown, never logged (log redaction test).
-- Canonicalisation per type; normalisers (trim, lower, NFC).
+- `MasterKeyProvider` interface; **`static` provider** (≥ 256-bit key from a secret file/env, versioned); test provider. Keys held in memory only, zeroed on shutdown, never logged (log-redaction test).
+- HKDF per (realm, version, domain); canonicalisation per type; normalisers (trim, lower, NFC).
 - Strategies: `hash`, `tokenize`, `fpe_ff1` (Bouncy Castle), `email`, `dictionary`, `date_shift`, `numeric_noise`, `partial`, `null`, `constant`.
-- Type codecs for ClickHouse types incl. Nullable, LowCardinality, Array, Map (keys/values), Tuple, JSON paths in String/JSON columns.
-- Row masker: compiled per table spec (column index → masker), entity-column lookups, per-domain LRU cache, collision check option.
-- Micro-benchmarks (JMH) for throughput per strategy.
+- Type codecs: integers, Decimal, Float, String/FixedString, dates, UUID, IP, Enum, Nullable, LowCardinality, Array, Map (keys/values), Tuple, JSON type and JSON-in-String paths.
+- Row masker compiled per table spec, entity-column lookups, per-domain LRU cache, collision check option.
+- JMH micro-benchmarks per strategy.
 
 Exit criteria
-- Property tests (Kotest): determinism (same input → same output across instances/runs), realm and version separation, format preservation for `tokenize`/`fpe_ff1`, type-range safety, NULL handling, `fpe_ff1` bijectivity on sampled domains.
-- Cross-table consistency test: `customer_id` as `UInt64` in one table and `String` in another mask to the same value.
-- Throughput ≥ 50 MB/s uncompressed per core on the benchmark tables.
+- Property tests (Kotest): determinism across instances and runs, realm and version separation, format preservation for `tokenize`/`fpe_ff1`, type-range safety, NULL handling, `fpe_ff1` bijectivity on sampled domains.
+- Cross-table consistency: `customer_id` as `UInt64` in one table and `String` in another mask to the same value.
+- Throughput ≥ 50 MB/s uncompressed per core on benchmark tables.
 - Security review of key handling and strategies.
 
-### M2 — Batch transfer via CLI (M/L)
+### M2 — Batch transfer via CLI, sharded source (L)
 
 Scope
-- `clickhouse` module: client-v2 wrapper with streaming `RowBinaryWithNamesAndTypes` read, streaming `RowBinary` insert, backpressure through a bounded pipe, per-query settings, deterministic `query_id`, cancellation.
-- Schema sync (SPEC §5.2): `SHOW CREATE TABLE` rewrite (cluster, ZooKeeper paths, overrides, Distributed), create on target, drift detection → `SCHEMA_DRIFT` / `UNCLASSIFIED_COLUMN`.
-- Chunk planner (SPEC §5.3): `system.parts` partitions, COB → partition mapping, `EXPLAIN ESTIMATE`, sort-key range splitting.
+- `clickhouse` module: client-v2 wrapper with streaming `RowBinaryWithNamesAndTypes` read, streaming `RowBinary` insert, bounded pipe with backpressure, per-query settings, deterministic `query_id`, cancellation.
+- Schema sync (SPEC §5.2): `SHOW CREATE TABLE` rewrite, create on target, drift detection across all DR shards → `SCHEMA_DRIFT` / `UNCLASSIFIED_COLUMN`.
+- **Per-shard chunk planner** (SPEC §5.3): `system.parts` per DR shard replica, COB → partition mapping, `EXPLAIN ESTIMATE`, sort-key range splitting via `mergeTreeIndex()`, shard interleaving.
 - Writer (SPEC §5.4): per-chunk staging, `ATTACH PARTITION FROM`, sub-partition merge, `REPLACE PARTITION`, staging cleanup, janitor; target environment marker check before every write; `repl_meta` tables (environment, table key versions, copy history).
-- `cli copy --table … --cob … --target …` runs end to end **without** the guard — usable only against Testcontainers / dev clusters (hard-coded refusal unless the source is marked `role: dev` in config).
+- **Shard mapping** (SPEC §5.5): `same_shards`, `distributed`, `single`.
+- `cli copy --table … --cob … --target …` end to end **without** the guard — only allowed when the source is declared `dc: test` (Testcontainers/dev); refused for `dc: dr`.
 
 Exit criteria
 - IT: copy a monthly-partitioned table for one COB date into a target that already has other dates in that month → only that date replaced, other dates intact, masked columns masked.
+- IT: 3-shard DR → 3-shard target (`same_shards`) and → single-node target (`single`): row counts per shard and in total match the source.
 - IT: re-run the same copy → identical target state (idempotency).
 - IT: kill the worker mid-chunk → re-run completes, no duplicates.
-- IT: prod gains a new column → job blocks with `UNCLASSIFIED_COLUMN`.
+- IT: a new column appears at the source → job blocks with `UNCLASSIFIED_COLUMN`.
 - IT: Array/Map/Nullable/LowCardinality/JSON columns round-trip with masking.
 - IT: target marker mismatch → write refused.
+- IT (every test): "prod" container's `query_log` shows no `repl_*` user.
 
-### M3 — Prod Guard (L)
+### M3 — Source Guard (L)
 
 Scope
-- `deploy/prod-ddl.sql`: users, settings profile with constraints, quota, workload DDL variants by ClickHouse version (SPEC §4.2). IT applies it to the `prod` container and asserts the limits (e.g. `max_threads` cannot be raised, writes are refused).
-- Signal collectors per host (SPEC §4.4), direct per-host polling with timeouts; staleness → UNKNOWN.
-- State machine GREEN/AMBER/RED/UNKNOWN with stable window and release ratio; per-host and per-cluster.
-- Admission tokens (Postgres-leased; in-memory implementation for CLI/dev), concurrency limits.
+- `deploy/dr-users.d/*.xml` and `deploy/dr-ddl.sql`: users, settings profile with constraints, quota, and **25.8 workload/resource DDL** (`CREATE RESOURCE` disk/cpu, `background` and `replication_reads` workloads, `merge_workload`/`mutation_workload` server settings). Verified against 25.8 and 26.8 images.
+- `validate-config --online`: DR `system.user_directories` is local (or XML provisioning is used), the L1 profile is in effect for `repl_reader`, schema matches on all shards.
+- DR signal collectors per host (SPEC §4.4): replication (delay, queue size/age, stuck entries, in-flight fetches, readonly/session), host (CPU, IO wait, memory), background (merges, mutations); direct per-host polling with timeouts; staleness → UNKNOWN.
+- **DC-role check** (SPEC §4.6): foreign-activity detection (`system.processes` users, `InsertQuery` deltas, `ignored_users`), operator failover flag, optional external endpoint; DR_ACTIVE state with manual clear.
+- State machine GREEN/AMBER/RED/DR_ACTIVE/UNKNOWN with stable window and release ratio; per host and per cluster; `fail_closed_scope`.
+- Admission tokens (Postgres-leased; in-memory for CLI/dev), `per_host` and `global` concurrency.
 - Pre-emption: connection cancel + `KILL QUERY … ASYNC` backstop restricted to `repl_reader` and the chunk's `query_id`.
-- Blackout windows (cron + duration + TZ), global pause flag, circuit breaker.
-- Wait-reason rendering (user, host, elapsed, memory — never query text).
+- Blackout windows, global pause, circuit breaker; runtime DNS re-check against the active-DC deny-list.
+- Wait-reason rendering (host, signal, value, threshold — never query text).
 - Guard leader election (Postgres advisory lock) and failover.
-- Wire the guard into the M2 pipeline; remove the `role: dev` bypass for non-dev sources.
+- Wire the guard into the M2 pipeline.
 
-Exit criteria (all against Testcontainers, with a load generator issuing heavy foreign queries on `prod`)
-- A heavy foreign query running on `prod` → submitted copy stays in `WAITING_FOR_PROD` with the correct reason; it starts only after the query ends and `stable_window` passes.
-- A heavy query started **during** a chunk → replication query ends within `poll_interval + 5 s`; chunk re-queued as `PREEMPTED`; job eventually succeeds with correct data.
-- Guard cannot reach a watched host → no reads start (fail closed); running chunk is pre-empted.
-- Blackout window, global pause, and circuit breaker each block admission.
-- The guard never kills a query of another user (negative test with a foreign query matching the same `query_id` prefix).
-- An attempt to read without a token is rejected in code (unit test) and a read without a `_partition_id` predicate is refused (unit + IT via `force_index_by_date`).
-- Security review of the guard and the prod DDL.
+Exit criteria (Testcontainers, with the load generator)
+- **Replication lag gating**: heavy inserts / a large mutation on "prod" create replication backlog on "DR" → a submitted copy stays `WAITING_FOR_SOURCE` with the right reason, and starts only after DR catches up and `stable_window` passes.
+- **Lag during a chunk**: backlog created mid-chunk → the replication read ends within `poll_interval + 5 s`; chunk `PREEMPTED`; the job later succeeds with correct data.
+- **Failover**: a foreign user query or an `INSERT` on "DR" → DR_ACTIVE within one poll; running chunks killed; nothing restarts until an operator clears the flag.
+- Operator failover flag, blackout window, global pause and circuit breaker each block admission.
+- Guard cannot reach a DR host → no reads start (fail closed); running chunk pre-empted.
+- The guard never kills another user's query (negative test with a foreign query whose `query_id` has the same prefix).
+- A read without a token is rejected in code; a read without a `_partition_id` predicate is refused (unit + IT via `force_index_by_date`).
+- Workload DDL applies cleanly on 25.8 and 26.8; with merges and our reads contending on "DR", background work gets the configured share (measured).
+- **Zero contact with "prod"**: its `query_log` and connection metrics show no `repl_*` activity across the whole M3 suite.
+- Security review of the guard and the DR provisioning files.
 
 ### M4 — Control plane: jobs, workers, REST API (M/L)
 
 Scope
-- Postgres schema (Flyway): `jobs`, `chunks`, `partition_tasks`, `leases`, `tokens`, `watermarks`, `fingerprints`, `guard_state_history`, `audit_log`, `config_versions`.
+- Postgres schema (Flyway): `jobs`, `chunks`, `partition_tasks`, `leases`, `tokens`, `watermarks`, `fingerprints`, `guard_state_history`, `copy_registry`, `audit_log`, `config_versions`, `ops_flags` (pause, failover).
 - Queue: `FOR UPDATE SKIP LOCKED` claim, leases + heartbeats, retry/backoff, pre-emption accounting, advisory locks per `(target, table, partition)`.
-- Scheduling: two queues with weighted fair share, per-user caps, request coalescing (SPEC §7.3).
+- Scheduling: two queues with weighted fair share, per-user caps, request coalescing, serialisation of overlapping requests on shared targets (SPEC §7.3).
 - Job lifecycle and cancellation (SPEC §7.2), including killing running reads and dropping staging.
-- Spring Boot app with roles; REST API from SPEC §7.5; OpenAPI generation; OIDC resource server; RBAC + quotas (SPEC §7.4); idempotency keys.
-- Audit log writes in the same transaction as state transitions.
+- Spring Boot app with roles; REST API from SPEC §7.5; OpenAPI generation; OIDC resource server; RBAC + quotas (SPEC §7.4); idempotency keys; failover-flag endpoints.
+- "Last copied" registry written on each REPLACE (Postgres + `repl_meta.copy_history`).
+- Audit log in the same transaction as state transitions.
 - CLI `submit/status/cancel/dry-run` against the API.
 
 Exit criteria
-- IT: submit via API → job runs through guard → SUCCEEDED; audit rows complete.
-- IT: kill a worker pod/process mid-run → lease expiry → another worker completes.
-- IT: two identical submissions → one job, two requesters.
-- IT: RBAC — user without access to a dataset/target gets 403; over-quota request rejected with message.
+- IT: submit via API → job runs through the guard → SUCCEEDED; audit and registry rows complete.
+- IT: kill a worker process mid-run → lease expiry → another worker completes.
+- IT: two identical submissions → one job, two requesters notified.
+- IT: overlapping requests on the same slice → serialised, final state matches the later request.
+- IT: RBAC — user without access to a dataset/target gets 403; over-quota request rejected with a message.
 - IT: cancel during RUNNING → read killed, staging dropped, target unchanged.
 
 ### M5 — Continuous mode (M)
 
 Scope
 - Scheduler role creating poll jobs from `continuous:` entries (leader-elected).
-- `append_watermark` (overlap, dedupe modes, `only_recent_partitions`), watermark persistence after commit.
-- `partition_fingerprint` (metadata fingerprint, optional checksum verify, re-check after copy, `sync_drops`).
+- `append_watermark` per shard (overlap, dedupe modes, `only_recent_partitions`), watermark persistence after commit.
+- `partition_fingerprint` per shard (metadata fingerprint, optional checksum verify, re-check after copy, `sync_drops`).
 - `scheduled_full_refresh` (cron, TZ).
-- Lag metrics and alerts; pause/resume API.
+- End-to-end lag metrics (with the DR replication-delay component) and alerts; pause/resume API.
 
 Exit criteria
-- IT: rows inserted on `prod` appear on `target` within `interval + copy time` while the guard is GREEN.
+- IT: rows inserted on "prod" replicate to "DR" and appear on the target within `interval + copy time` while the guard is GREEN — without the tool touching "prod".
 - IT: late rows within `overlap` are picked up without duplicates.
-- IT: `ALTER TABLE … UPDATE/DELETE` mutation on `prod` → affected partition re-copied (fingerprint mode).
-- IT: partition dropped on `prod` → dropped on target when `sync_drops`.
+- IT: a mutation on "prod" → replicated to "DR" → affected partition re-copied (fingerprint mode).
+- IT: a partition dropped on "prod" → dropped on the target when `sync_drops`.
 - IT: guard RED for 10 minutes → lag grows, then catches up after GREEN; no reads during RED.
 
 ### M6 — Portal (M)
 
 Scope
 - React + TS SPA served by the app; OIDC login (authorization code + PKCE).
-- Pages: Catalog / New request (dataset or table → COB date(s) → target → estimate → submit), My jobs (state, queue position, wait reason, progress, ETA, cancel), Job detail (per-table/chunk), Guard status (read-only banner + page), Continuous status (lag vs SLO), Admin (pause/resume, config version).
-- Polling or SSE for live updates.
-- Notifications on completion (portal; optional webhook for email/Slack).
+- Pages: New request (dataset or table → COB date(s) → shared target → estimate incl. **last-copied info and recent-overwrite confirmation** → submit), My jobs (state, queue position, wait reason, per-shard progress, data freshness, ETA, cancel), Job detail, Target history (last-copied registry), Guard status (banner + page incl. DR_ACTIVE), Continuous status, Ops/Admin (pause/resume, failover flag, config version).
+- Polling or SSE for live updates; completion notifications in the portal (optional webhook).
 
 Exit criteria
-- Playwright E2E against the dockerised stack: a QA user selects `trading-eod` for a COB date and target `qa1`, sees the estimate, submits, sees `WAITING_FOR_PROD` while a heavy query runs on `prod`, then progress, then SUCCEEDED; masked data verified on target.
+- Playwright E2E against the dockerised stack: a QA user selects `trading-eod` for a COB date and target `qa1`, sees the estimate and last-copied info, submits, sees `WAITING_FOR_SOURCE` while the load generator creates DR replication backlog, then progress, then SUCCEEDED; masked data verified on the target.
+- E2E: a second user replacing the same slice within 24 h must tick the confirmation.
 - Accessibility check (axe) passes on the main flows.
 
 ### M7 — Hardening and production readiness (M/L)
 
 Scope
-- Sharded sources (per-shard planning, read-replica selection, shard mapping to target).
 - `mv_mode` variants (SPEC §5.2).
-- Grafana dashboard and Prometheus alert rules (SPEC §11).
+- Grafana dashboard and Prometheus alert rules (SPEC §11), including `chrepl_active_dc_violations_total` and DR_ACTIVE.
 - Target retention janitor.
 - `rekey` job type for masking key rotation.
-- Helm chart, resource limits, PodDisruptionBudgets, network policies (workers egress only to prod read replicas/targets/Vault/Postgres).
-- **Load test** on a prod-like staging cluster: replay a representative query workload, run replication at full concurrency, and measure prod query latency and resource usage with and without replication; tune guard thresholds.
-- `docs/runbook.md`: pause/drain, adding a table, handling drift, rekey, stuck job, guard UNKNOWN.
-- Penetration test / security review of the portal and API.
+- Helm chart, resource limits, PodDisruptionBudgets, **egress NetworkPolicy** (DR hosts, targets, Postgres, OIDC, key store only).
+- **Load test** on a prod-like staging pair (active + DR replicas, 3 shards): replay a representative ingest workload into the "active" side, run replication at full allowed concurrency on the DR side, and measure DR `absolute_delay`, replication queue and fetch throughput with and without the tool; tune thresholds.
+- `docs/runbook.md`: pause/drain, **DC failover and failback** (set/clear failover flag, swap source/deny-list config), adding a table, handling drift, rekey, stuck job, guard UNKNOWN.
+- Security review / pen test of the portal and API.
 
 Exit criteria
-- Load test: prod p99 query latency and error rate stay within the agreed impact budget (SPEC §1.3) with replication running; pre-emption latency ≤ `poll_interval + 5 s` at the 99th percentile.
-- Runbook reviewed by the on-call team; dashboards and alerts live in staging.
-- Go-live checklist signed off by data-platform, security, and prod DBAs.
+- Load test meets the impact budget (SPEC §1.3): zero connections to the active side; DR `absolute_delay` p99 increase ≤ B seconds (proposed 5 s); pre-emption latency ≤ `poll_interval + 5 s` at p99. Budget and thresholds signed off by the repository owner.
+- Failover drill in staging: promoting the DR side stops all replication reads within one poll interval.
+- Runbook reviewed by on-call; dashboards and alerts live in staging.
+
+### M8 — Fortanix DSM key provider (S/M)
+
+Scope
+- `fortanix` `MasterKeyProvider`: authenticate (API key or client certificate), unwrap the HMAC master key with a non-exportable KEK (or export an exportable HMAC security object), cache in memory, version mapping.
+- Migration path from `static`: import the same key material into DSM (BYOK) with the same version → identical masked values, no rekey.
+- Failure handling: DSM unreachable at start-up → workers refuse chunks (fail closed); no per-value DSM calls.
+
+Exit criteria
+- IT against a DSM sandbox or a mock implementing the DSM unwrap API: masked output identical to the `static` provider for the same key material.
+- Security review of DSM credentials handling.
 
 ### Later (not scheduled)
 
-- Approval workflow for large ad-hoc requests.
 - Restricted custom filters (SPEC §7.6).
-- Per-user target namespaces with automatic cleanup.
-- Kafka-tap source for continuous mode (consume prod ingestion topics, zero prod reads).
+- Kafka-tap source for continuous mode (consume ingestion topics, zero ClickHouse reads).
 
 ---
 
@@ -199,26 +237,33 @@ Exit criteria
 ```
 M0 ─► M1 ─► M2 ─► M3 ─► M4 ─┬─► M5 ─┬─► M7
                             └─► M6 ─┘
+       M1 ───────────────────────────────► M8 (any time after M1; before key custody moves to DSM)
 ```
 
-M1 and the read/write half of M2 can proceed in parallel with two engineers; M5 and M6
-can proceed in parallel after M4.
+M1 and the read/write half of M2 can proceed in parallel with two engineers; M5 and M6 can
+proceed in parallel after M4.
 
 ## 5. Risks and mitigations
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| No dedicated read replica available on prod | Residual impact (page/mark cache, IO) on serving replicas | L1 cache-bypass settings, stricter guard thresholds, lower concurrency; escalate as an infra ask (SPEC §13 Q1). |
-| Prod ClickHouse version lacks workload scheduling | One fewer in-server safeguard | Guard + L1 limits still apply; DDL has version-specific variants. |
-| `force_index_by_date` not satisfiable for some tables | Cannot use the server-side scan guard | Validation flags them; only small `full_copy` tables may relax it. |
-| Masking collisions on unique columns | Constraint/key violations in QA data | `fpe_ff1` for keys; `collision_check`; property tests. |
+| Each DR shard has only one replica, shared with fetches/merges | Our reads slow DR replication → RPO grows | Replication-lag gating and pre-emption; concurrency 1 per host; workload scheduling favouring background work; M7 load test against the impact budget. |
+| DR access storage replicated via Keeper, or DDL run `ON CLUSTER` | Replication users appear on the active DC | Provision via `users.d` XML on DR nodes only; `validate-config --online` checks `system.user_directories`; runbook warning. |
+| Failover not detected (DR serves traffic but no foreign queries seen in a poll) | Reads on a now-active DC | Multiple triggers (foreign queries, `InsertQuery` deltas, operator flag in the failover runbook, optional external role signal); manual clear only. |
+| DNS change points a DR name at the active DC | Contact with active DC | Runtime DNS re-check against the CIDR deny-list; NetworkPolicy blocks egress regardless. |
+| Workload-scheduling syntax/behaviour differs between 25.8 and 26.8 | One fewer in-server safeguard | Version-specific DDL tested in the CI matrix; guard + L1 limits still apply. |
+| `force_index_by_date` not satisfiable for some tables | No server-side scan guard | Validation flags them; only small `full_copy` tables may relax it. |
+| Masking collisions on unique columns | Key violations in QA data | `fpe_ff1` for keys; `collision_check`; property tests. |
 | New PII column added to prod unnoticed | Leak to non-prod | Fail-closed `UNCLASSIFIED_COLUMN`; PII name scanner; drift alerts. |
-| Guard thresholds too strict → replication never runs | Stale QA data | Guard dashboards show time-in-state per reason; tune in M7 load test; blackout windows explicit. |
-| Guard thresholds too loose | Prod impact | Start strict; loosen only with load-test evidence; circuit breaker. |
-| Large ad-hoc requests starve continuous jobs | Lag SLO breaches | Weighted fair share, quotas, chunk sizing. |
+| Shared targets: users overwrite each other's slices | Confusing QA results | Last-copied registry, recent-overwrite confirmation, serialisation, notifications. |
+| Guard too strict → replication rarely runs | Stale QA data | Time-in-state dashboards per reason; tune in M7; explicit blackout windows. |
+| Static key leaked from the secret store | Masked values linkable/reversible (`fpe_ff1`) | Secret mounted read-only to workers only; audit; move to Fortanix (M8); rotate + `rekey` if exposed. |
 
-## 6. Decisions needed before M2 starts
+## 6. Decisions still needed
 
-From SPEC §13: ClickHouse versions and topology (Q2, Q3), read-replica availability (Q1),
-key custody (Q4). Before M6: target namespace model (Q5), approvals (Q6), notifications (Q10).
-Before M7: impact budget and threshold sign-off (Q7), blackout windows (Q8), retention (Q9).
+From SPEC §13.2:
+
+- **Before M3**: DR access storage type (Q2), monitoring users to ignore (Q3), external DC-role signal availability (Q4).
+- **Before M4/M6**: target topologies (Q10), notifications (Q9), retention on shared targets (Q8).
+- **Before M7**: impact-budget values and threshold sign-off (Q1), network path DR → targets (Q5), blackout windows (Q7).
+- **Before M8**: Fortanix wrap/unwrap vs exportable key, worker authentication (Q6).
