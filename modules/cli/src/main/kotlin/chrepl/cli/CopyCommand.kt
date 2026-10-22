@@ -3,9 +3,14 @@ package chrepl.cli
 import chrepl.config.load.ConfigLoader
 import chrepl.config.validate.ConfigValidator
 import chrepl.config.validate.ValidationOptions
+import chrepl.guard.GuardFactory
+import chrepl.guard.GuardGate
 import chrepl.masking.MaskingEngine
 import chrepl.masking.keys.StaticKeyProvider
+import chrepl.transfer.Chunk
+import chrepl.transfer.ClientFactory
 import chrepl.transfer.CopyJob
+import chrepl.transfer.JobListener
 import chrepl.transfer.UnguardedGate
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
@@ -19,12 +24,12 @@ import java.time.LocalDate
 import java.time.format.DateTimeParseException
 
 /**
- * Copies tables or a dataset to a target in the foreground (PLAN M2). Until the Source Guard
- * exists this runs only against `dc: test` sources; copies from DR go through the control plane.
+ * Copies tables or a dataset to a target in the foreground. For a `dc: dr` source every read goes
+ * through an in-process Source Guard (SPEC §4); `dc: test` sources (dev/Testcontainers) run unguarded.
  */
 class CopyCommand : CliktCommand(name = "copy") {
     override fun help(context: Context) =
-        "Copy tables (or a dataset) for COB dates to a target, masking on the way. Development/test sources only (dc: test)."
+        "Copy tables (or a dataset) for COB dates to a target, masking on the way. Reads from DR wait for the Source Guard."
 
     private val configPath by option("--config", help = "config file or directory").path().required()
     private val target by option("--target", help = "target environment name, e.g. qa1").required()
@@ -43,7 +48,6 @@ class CopyCommand : CliktCommand(name = "copy") {
             )
         }
         val source = config.sources.values.single()
-        if (source.dc != "test") fail("copy runs without the Source Guard and is refused for dc: ${source.dc}")
 
         val names =
             tables +
@@ -60,8 +64,21 @@ class CopyCommand : CliktCommand(name = "copy") {
                 fail("invalid COB date: ${e.parsedString}")
             }
 
+        val guard = if (source.dc == "test") null else GuardFactory.create(config.guard, source, ClientFactory()).start()
+        val gate =
+            guard?.let {
+                GuardGate(it) { _, reasons -> echo("  waiting for the source: ${reasons.joinToString("; ")}") }
+            } ?: UnguardedGate
         MaskingEngine.create(config.masking, StaticKeyProvider(config.masking), loaded.baseDir).use { engine ->
-            val job = CopyJob(config, target, engine, UnguardedGate)
+            val listener =
+                object : JobListener {
+                    override fun chunkPreempted(
+                        chunk: Chunk,
+                        attempt: Int,
+                        reason: String,
+                    ) = echo("  chunk ${chunk.id} pre-empted (attempt $attempt): $reason")
+                }
+            val job = CopyJob(config, target, engine, gate, listener = listener)
             echo("job ${job.jobId}: ${names.size} table(s) to $target, COB ${dates.ifEmpty { listOf("n/a") }.joinToString()}")
             for (name in names.distinct()) {
                 val result = job.copy(name, dates)
@@ -71,6 +88,7 @@ class CopyCommand : CliktCommand(name = "copy") {
                 )
             }
         }
+        guard?.close()
     }
 
     private fun fail(message: String): Nothing {

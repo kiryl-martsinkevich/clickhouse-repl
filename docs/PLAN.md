@@ -146,7 +146,28 @@ Exit criteria
 - IT: target marker mismatch → write refused.
 - IT (every test): "prod" container's `query_log` shows no `repl_*` user.
 
-### M3 — Source Guard (L)
+### M3 — Source Guard (L) — ✅ done
+
+Delivered: `modules/guard` (per-host signal collection in one query, GREEN/AMBER/RED/DR_ACTIVE/UNKNOWN
+state machine with stable window and release ratio, permits with global/per-host concurrency,
+pre-emption by connection cancel plus a `KILL QUERY` backstop pinned to the reader and query id,
+DR_ACTIVE on foreign queries or inserts, pause/failover flags, blackout windows via cron, circuit
+breaker, wait reasons), `GuardGate` plugged into the copy pipeline (pre-empted chunks are retried),
+`cli copy` guarded for `dc: dr`, `deploy/dr-ddl.sql` and `deploy/dr-users.d/chrepl.xml`. 15 state
+machine tests and 8 integration tests on a Keeper + prod + DR `ReplicatedMergeTree` pair.
+
+Found while testing against real servers (all fixed and covered by tests):
+1. `system.replicas` / `system.replication_queue` only show tables the user may `SHOW`: without
+   `GRANT SHOW TABLES ON *.*` the guard saw *no* backlog. The guard now also treats "no replicated
+   tables visible" as UNKNOWN, so a missing grant fails closed.
+2. `readonly` in the guard's profile forbids `KILL QUERY` on the reader's queries; the guard profile
+   no longer sets it (its grants are limited to system-table reads and `KILL QUERY`).
+3. `max_network_bandwidth` does not throttle HTTP reads; `max_local_read_bandwidth` does and is now
+   part of the reader profile.
+
+Not done in M3: the background-work share under workload scheduling is provisioned and asserted to
+exist, but not yet measured (moved to the M7 load test).
+
 
 Scope
 - `deploy/dr-users.d/*.xml` and `deploy/dr-ddl.sql`: users, settings profile with constraints, quota, and **25.8 workload/resource DDL** (`CREATE RESOURCE` disk/cpu, `background` and `replication_reads` workloads, `merge_workload`/`mutation_workload` server settings). Verified against 25.8 and 26.8 images.

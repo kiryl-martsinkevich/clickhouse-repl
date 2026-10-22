@@ -106,7 +106,7 @@ internal class ChunkCopier(
         targetClient.execute("DROP TABLE IF EXISTS ${Sql.ident(target.database)}.${Sql.ident(staging)}")
         targetClient.execute(DdlRewriter.forStaging(target.createStatement, target.database, staging))
         val read = SourceQueries.read(spec, columnNames, chunk)
-        return gate.withPermit(sourceClient.endpoint.host, queryId) { cancellation ->
+        return gate.withPermit(sourceClient.endpoint.toString(), queryId) { cancellation ->
             targetClient.insert("${Sql.ident(target.database)}.${Sql.ident(staging)}", columnNames) { writer ->
                 sourceClient.queryRows(
                     read.sql,

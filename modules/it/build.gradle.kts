@@ -4,6 +4,7 @@ plugins {
 
 dependencies {
     testImplementation(project(":transfer"))
+    testImplementation(project(":guard"))
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
     testImplementation(kotlin("test"))
@@ -14,6 +15,7 @@ dependencies {
 tasks.test {
     enabled = project.hasProperty("it")
     systemProperty("chrepl.exampleConfig", rootProject.file("docs/examples/replicator.yaml").absolutePath)
+    systemProperty("chrepl.drDdl", rootProject.file("deploy/dr-ddl.sql").absolutePath)
     (project.findProperty("chrepl.it.image") as String?)?.let { systemProperty("chrepl.it.image", it) }
     maxParallelForks = 1
     testLogging { events("passed", "skipped", "failed") }

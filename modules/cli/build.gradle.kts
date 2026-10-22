@@ -6,6 +6,7 @@ plugins {
 dependencies {
     implementation(project(":config"))
     implementation(project(":transfer"))
+    implementation(project(":guard"))
     implementation(libs.clikt)
     implementation(platform(libs.jackson.bom))
     implementation(libs.jackson.databind)

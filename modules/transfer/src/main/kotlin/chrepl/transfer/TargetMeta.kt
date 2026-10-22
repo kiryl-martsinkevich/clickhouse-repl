@@ -136,13 +136,21 @@ data class CopyRecord(
  * this; reads always go through a gate.
  */
 interface ReadGate {
-    /** Runs [read] once the guard admits a read on [host]; [read] receives a cancellation the guard may trigger. */
+    /**
+     * Runs [read] once the guard admits a read on [host] (`host:port`); [read] receives a cancellation
+     * the guard may trigger, in which case [PreemptedException] is thrown.
+     */
     fun <T> withPermit(
         host: String,
         queryId: String,
         read: (chrepl.clickhouse.Cancellation) -> T,
     ): T
 }
+
+/** The guard stopped a read (SPEC §4.5); the chunk is retried and nothing partial is published. */
+class PreemptedException(
+    message: String,
+) : Exception(message)
 
 /** No guard: only allowed for `dc: test` sources (Testcontainers / dev). */
 object UnguardedGate : ReadGate {

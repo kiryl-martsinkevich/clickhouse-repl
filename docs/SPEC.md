@@ -204,7 +204,8 @@ CREATE SETTINGS PROFILE repl_reader_profile SETTINGS
     max_memory_usage = 4000000000 MAX 4000000000,   -- 4 GB per query
     max_execution_time = 900 MAX 900,               -- chunks are sized well below this
     max_bytes_to_read = 50000000000 MAX 50000000000,
-    max_network_bandwidth = 50000000 MAX 50000000,  -- 50 MB/s per query
+    max_network_bandwidth = 50000000 MAX 50000000,  -- 50 MB/s per query (native protocol only — not HTTP)
+    max_local_read_bandwidth = 50000000 MAX 50000000,  -- disk-read throttle; the one that bounds HTTP reads
     max_network_bandwidth_for_user = 100000000 MAX 100000000,
     max_concurrent_queries_for_user = 2 MAX 2,
     use_uncompressed_cache = 0 CONST,
@@ -226,13 +227,16 @@ CREATE QUOTA repl_reader_quota FOR INTERVAL 1 hour
     TO repl_reader;
 
 -- Guard user: reads system tables and can kill replication queries only.
+-- No readonly for the guard: readonly forbids KILL QUERY on other users' queries (found in M3 testing).
 CREATE USER repl_guard IDENTIFIED WITH sha256_password BY '…' HOST IP '10.20.0.0/16'
-    SETTINGS readonly = 2, max_threads = 1, max_execution_time = 10, max_memory_usage = 200000000;
+    SETTINGS max_threads = 1, max_execution_time = 10, max_memory_usage = 200000000;
 GRANT SELECT ON system.processes, system.metrics, system.events, system.asynchronous_metrics,
                system.merges, system.mutations, system.replication_queue, system.replicas,
                system.replicated_fetches
     TO repl_guard;
 GRANT KILL QUERY ON *.* TO repl_guard;  -- used only with WHERE user = 'repl_reader' (enforced in code + tested)
+-- system.replicas / system.replication_queue only list tables the user may SHOW (found in M3 testing):
+GRANT SHOW TABLES ON *.* TO repl_guard;
 ```
 
 Workload scheduling on DR (ClickHouse 25.8 SQL workloads; exact syntax and the set of
@@ -314,7 +318,7 @@ without ever touching the active DC.
 | **AMBER** | Below threshold but not yet stable, or within 80–100 % of a threshold. | Cheap metadata queries only (`system.parts`, `EXPLAIN ESTIMATE`). No new chunks. |
 | **RED** | A threshold exceeded, blackout, kill switch, failover flag, circuit open. | Only the guard's own polls. Running chunks pre-empted. |
 | **DR_ACTIVE** | DR looks active (§4.6). A RED sub-state with its own release rule. | As RED; requires explicit confirmation to leave. |
-| **UNKNOWN** | Host unreachable, poll failed, poll stale (> 3× interval), clock skew. | **Treated as RED** (fail closed). |
+| **UNKNOWN** | Host unreachable, poll failed, poll stale (> 3× interval), clock skew, or no replicated table visible to the guard user (a missing grant must never look like a healthy queue). | **Treated as RED** (fail closed). |
 
 **Hysteresis**: leaving RED requires `stable_window` of continuously clean samples, with
 signals below `release_ratio × threshold` (default 0.8).

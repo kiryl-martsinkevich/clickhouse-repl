@@ -126,3 +126,43 @@ class IdentifiersTest {
         assertEquals(emptySet(), Identifiers.of("tuple()"))
     }
 }
+
+class CronExpressionTest {
+    private fun at(text: String) = java.time.ZonedDateTime.parse(text)
+
+    @Test
+    fun matching() {
+        val weekdays =
+            chrepl.config.cron.CronExpression
+                .parse("0 17 * * 1-5")
+        assertTrue(weekdays.matches(at("2026-10-22T17:00:00Z"))) // Thursday
+        assertFalse(weekdays.matches(at("2026-10-24T17:00:00Z"))) // Saturday
+        assertFalse(weekdays.matches(at("2026-10-22T17:01:00Z")))
+        val monthEnd =
+            chrepl.config.cron.CronExpression
+                .parse("0 0 L * *")
+        assertTrue(monthEnd.matches(at("2026-02-28T00:00:00Z")))
+        assertFalse(monthEnd.matches(at("2026-02-27T00:00:00Z")))
+        assertTrue(
+            chrepl.config.cron.CronExpression
+                .parse("*/15 * * * SUN")
+                .matches(at("2026-10-25T09:45:00Z")),
+        )
+        assertTrue(
+            chrepl.config.cron.CronExpression
+                .parse("0 0 * * 7")
+                .matches(at("2026-10-25T00:00:00Z")),
+        )
+    }
+
+    @Test
+    fun windows() {
+        val eod =
+            chrepl.config.cron.CronExpression
+                .parse("0 17 * * 1-5")
+        val fiveHours = java.time.Duration.ofHours(5)
+        assertTrue(eod.withinWindow(at("2026-10-22T21:59:00Z"), fiveHours))
+        assertFalse(eod.withinWindow(at("2026-10-22T22:00:00Z"), fiveHours))
+        assertFalse(eod.withinWindow(at("2026-10-22T16:59:00Z"), fiveHours))
+    }
+}

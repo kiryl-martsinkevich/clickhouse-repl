@@ -58,13 +58,14 @@ class CopyCommandTest {
     private val example = Path.of(System.getProperty("chrepl.exampleConfig"))
 
     @Test
-    fun `copy refuses a DR source because it would bypass the guard`() {
+    fun `copy validates secrets before touching any server`() {
+        // The example's secret files do not exist here, so validation with --resolve-secrets fails first.
         val result =
             cli().test(
                 listOf("copy", "--config", example.toString(), "--target", "qa1", "--table", "trading.trades", "--cob", "2026-10-19"),
-                envvars = emptyMap(),
             )
         assertEquals(ExitCodes.INVALID, result.statusCode, result.output)
+        assertContains(result.output, "SECRET_UNRESOLVED")
     }
 
     @Test

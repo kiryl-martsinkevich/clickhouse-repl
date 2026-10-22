@@ -61,6 +61,9 @@ class CopyJob(
     val jobId: String = newJobId(),
     private val requester: String = "cli",
     private val configVersion: String = "local",
+    /** Pause before re-reading a pre-empted chunk; the guard also blocks until the source is GREEN again. */
+    private val retryBackoff: (attempt: Int) -> Duration = { Duration.ofSeconds(minOf(1L shl minOf(it - 1, 5), 30L)) },
+    private val listener: JobListener = JobListener.NONE,
 ) {
     private val sourceName = config.sources.keys.single()
     private val source = config.sources.getValue(sourceName)
@@ -152,15 +155,17 @@ class CopyJob(
                     val staging = stagingName(table, chunkStagings.size.toString() + "_" + targetIndex)
                     val sourceClient = sourceClients.getValue(chunk.shard)
                     partitionRows +=
-                        copier.copy(
-                            chunk,
-                            sourceClient,
-                            targetClient,
-                            targetInfo,
-                            staging,
-                            masker,
-                            SourceQueries.queryId(jobId, chunk.id, 1),
-                        )
+                        copyWithRetry(chunk) { attempt ->
+                            copier.copy(
+                                chunk,
+                                sourceClient,
+                                targetClient,
+                                targetInfo,
+                                staging,
+                                masker,
+                                SourceQueries.queryId(jobId, chunk.id, attempt),
+                            )
+                        }
                     chunkStagings += staging
                 }
                 val total =
@@ -194,6 +199,23 @@ class CopyJob(
             TargetMeta.recordKeyVersion(targetClient, database, table, engine.realm, engine.keyVersion)
         }
         return TableResult(tableName, targetName, plan.chunks.size, rowsCopied, results, Duration.between(started, Instant.now()))
+    }
+
+    /** Pre-emptions are not failures: the chunk is re-read (into a fresh staging table) until it completes. */
+    private fun copyWithRetry(
+        chunk: Chunk,
+        copy: (attempt: Int) -> Long,
+    ): Long {
+        var attempt = 1
+        while (true) {
+            try {
+                return copy(attempt).also { listener.chunkDone(chunk, it) }
+            } catch (e: PreemptedException) {
+                listener.chunkPreempted(chunk, attempt, e.message ?: "")
+                Thread.sleep(retryBackoff(attempt).toMillis())
+                attempt++
+            }
+        }
     }
 
     /** For COB slices: target partitions containing the dates; for full copies: target partitions missing at the source. */
@@ -238,6 +260,24 @@ class CopyJob(
                     .toString()
                     .replace("-", "")
                     .take(16)
+    }
+}
+
+/** Progress callbacks (the control plane records them; M4). */
+interface JobListener {
+    fun chunkDone(
+        chunk: Chunk,
+        rows: Long,
+    ) {}
+
+    fun chunkPreempted(
+        chunk: Chunk,
+        attempt: Int,
+        reason: String,
+    ) {}
+
+    companion object {
+        val NONE = object : JobListener {}
     }
 }
 
