@@ -5,6 +5,13 @@ plugins {
 dependencies {
     testImplementation(project(":transfer"))
     testImplementation(project(":guard"))
+    testImplementation(project(":control"))
+    testImplementation(project(":app"))
+    testImplementation(project(":cli"))
+    testImplementation(libs.spring.boot)
+    testImplementation(libs.clikt)
+    testImplementation(platform(libs.spring.boot.bom))
+    testImplementation(libs.postgresql)
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
     testImplementation(kotlin("test"))

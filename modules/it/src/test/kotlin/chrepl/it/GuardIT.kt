@@ -3,9 +3,22 @@ package chrepl.it
 import chrepl.clickhouse.ClickHouseClient
 import chrepl.clickhouse.ClickHouseException
 import chrepl.clickhouse.Endpoint
+import chrepl.config.load.ConfigLoader
 import chrepl.config.model.ReplicatorConfig
 import chrepl.config.model.SecretRef
 import chrepl.config.validate.SecretReader
+import chrepl.config.validate.ValidationOptions
+import chrepl.control.ConfigRegistry
+import chrepl.control.Db
+import chrepl.control.JobRequest
+import chrepl.control.JobService
+import chrepl.control.JobState
+import chrepl.control.OpsService
+import chrepl.control.PgOpsFlags
+import chrepl.control.Principal
+import chrepl.control.Runtime
+import chrepl.control.Worker
+import chrepl.control.WorkerSettings
 import chrepl.guard.GuardFactory
 import chrepl.guard.GuardGate
 import chrepl.guard.GuardLevel
@@ -30,11 +43,13 @@ import org.junit.jupiter.api.Order
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.TestMethodOrder
+import java.nio.file.Files
 import java.time.Duration
 import java.time.LocalDate
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
+import kotlin.io.path.writeText
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -62,41 +77,44 @@ class GuardIT {
     fun start() {
         topology = ReplicatedTopology()
         ItFixtures.resetTargets()
-        config =
-            ItFixtures.config {
-                ((get("active_dc") as ObjectNode).get("hosts") as ArrayNode).add("127.0.0.42") // prod
-                val dr = child("sources").child("dr")
-                dr.put("dc", "dr")
-                dr
-                    .putArray("shards")
-                    .addObject()
-                    .put("name", "s1")
-                    .put("host", topology.dr.hostPort)
-                dr
-                    .child("dc_role_check")
-                    .putArray("ignored_users")
-                    .add("monitoring")
-                    .add("default") // default = the test's DBA
-                val qa1 = child("targets").child("qa1")
-                qa1.putArray("hosts").add(ItCluster.qa[0].hostPort)
-                qa1.put("shards", 1).put("shard_mapping", "single")
-                val guard = child("guard")
-                guard.put("poll_interval", "1s").put("stale_after", "3s").put("stable_window", "2s")
-                guard
-                    .child("thresholds")
-                    .child("replication")
-                    .put("max_queue_size", 3)
-                    .put("max_queue_oldest_age", "20s")
-                // Host-wide CPU/IO counters include the build machine; these tests are about replication and DR activity.
-                guard
-                    .child("thresholds")
-                    .child("host")
-                    .put("max_cpu_utilisation", 1.0)
-                    .put("max_io_wait", 1.0)
-                guard.putArray("blackout_windows")
-                guard.child("concurrency").put("global", 1)
-            }
+        config = ItFixtures.config(guardedConfig)
     }
+
+    /** The example config pointed at prod/DR/qa1 containers, with a DR source and fast guard timings. */
+    private val guardedConfig: ObjectNode.() -> Unit =
+        {
+            ((get("active_dc") as ObjectNode).get("hosts") as ArrayNode).add("127.0.0.42") // prod
+            val dr = child("sources").child("dr")
+            dr.put("dc", "dr")
+            dr
+                .putArray("shards")
+                .addObject()
+                .put("name", "s1")
+                .put("host", topology.dr.hostPort)
+            dr
+                .child("dc_role_check")
+                .putArray("ignored_users")
+                .add("monitoring")
+                .add("default") // default = the test's DBA
+            val qa1 = child("targets").child("qa1")
+            qa1.putArray("hosts").add(ItCluster.qa[0].hostPort)
+            qa1.put("shards", 1).put("shard_mapping", "single")
+            val guard = child("guard")
+            guard.put("poll_interval", "1s").put("stale_after", "3s").put("stable_window", "2s")
+            guard
+                .child("thresholds")
+                .child("replication")
+                .put("max_queue_size", 3)
+                .put("max_queue_oldest_age", "20s")
+            // Host-wide CPU/IO counters include the build machine; these tests are about replication and DR activity.
+            guard
+                .child("thresholds")
+                .child("host")
+                .put("max_cpu_utilisation", 1.0)
+                .put("max_io_wait", 1.0)
+            guard.putArray("blackout_windows")
+            guard.child("concurrency").put("global", 1)
+        }
 
     @AfterAll
     fun stop() = topology.close()
@@ -371,6 +389,64 @@ class GuardIT {
         killer.kill(drKey, "chrepl-own-1-1")
         val result = own.get(15, TimeUnit.SECONDS)
         assertTrue(result.isFailure, "our query should have been killed, got ${result.getOrNull()}")
+    }
+
+    @Test
+    @Order(8)
+    fun `a control plane job waits for the guard, then runs to SUCCEEDED, and Postgres flags reach the guard`() {
+        val date = LocalDate.of(2026, 10, 8)
+        insertOnProd("$date", 3_000, 60_000_000)
+        PostgresNode("127.0.0.53").start().use { postgres ->
+            val db = Db(postgres.dataSource()).also { it.migrate() }
+            val file = Files.createTempDirectory("chrepl-guarded").resolve("replicator.yaml")
+            file.writeText(ConfigLoader.mapper.writeValueAsString(ItFixtures.configTree(guardedConfig)))
+            ItFixtures.examplePath.parent
+                .resolve("dictionaries")
+                .toFile()
+                .copyRecursively(file.parent.resolve("dictionaries").toFile())
+            val configs = ConfigRegistry(db, file, ValidationOptions()).also { it.reload("test") }
+            val flags = PgOpsFlags(db)
+            val guard = GuardFactory.create(config.guard, config.sources.getValue("dr"), clients, flags).start()
+            Runtime(configs, db, secrets, guard, "guarded").use { runtime ->
+                val service = JobService(db, configs, runtime)
+                val ops = OpsService(configs, flags, runtime)
+                val alice = Principal("alice", setOf("qa-trading"))
+                val olga = Principal("olga", setOf("data-platform-ops"))
+                awaitLevel(guard, GuardLevel.GREEN)
+
+                // The operator failover flag in Postgres stops the guard within a poll, and clearing it releases it.
+                ops.setFailover(olga, "rehearsal")
+                awaitLevel(guard, GuardLevel.DR_ACTIVE)
+                assertEquals("DR_ACTIVE", ops.guard(alice).failover?.code)
+                ops.clearFailover(olga)
+                awaitLevel(guard, GuardLevel.GREEN)
+
+                Worker(db, configs, runtime, "w-guarded", WorkerSettings(threads = 2, idleSleep = Duration.ofMillis(100))).start().use {
+                    val id =
+                        try {
+                            makeDrLag()
+                            awaitLevel(guard, GuardLevel.RED)
+                            val job = service.submit(alice, JobRequest(dataset = "trades-only", cobDates = listOf(date), target = "qa1"))
+                            Thread.sleep(3_000)
+                            // Not even planned: planning reads DR metadata, which RED forbids.
+                            val held = service.get(alice, job.id)
+                            assertEquals(JobState.PENDING, held.state)
+                            assertTrue(held.waitingForSource, "$held")
+                            assertContains(held.waitReason!!, "replication queue")
+                            job.id
+                        } finally {
+                            endDrLag()
+                        }
+                    val deadline = System.nanoTime() + Duration.ofMinutes(2).toNanos()
+                    while (service.get(alice, id).state != JobState.SUCCEEDED) {
+                        val view = service.get(alice, id)
+                        if (view.state.terminal || System.nanoTime() > deadline) throw AssertionError("job did not succeed: $view")
+                        Thread.sleep(250)
+                    }
+                    assertEquals(3_000L, targetCount(date))
+                }
+            }
+        }
     }
 
     @Test

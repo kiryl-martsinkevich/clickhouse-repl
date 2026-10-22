@@ -23,7 +23,18 @@ object ItFixtures {
     val clients = ClientFactory(secrets)
 
     /** The example config, pointed at the test containers; validated before use. */
-    fun config(mutate: ObjectNode.() -> Unit = {}): ReplicatorConfig {
+    fun config(mutate: ObjectNode.() -> Unit = {}): ReplicatorConfig = bindValid(configTree(mutate))
+
+    fun bindValid(tree: ObjectNode): ReplicatorConfig {
+        val loaded = ConfigLoader.bind(tree)
+        val config = loaded.config ?: error("test config does not bind: ${loaded.issues}")
+        val errors = ConfigValidator().validate(config, examplePath.parent).issues.filter { it.severity == Severity.ERROR }
+        assertTrue(errors.isEmpty(), "test config is invalid: $errors")
+        return config
+    }
+
+    /** The example config tree pointed at the test containers. */
+    fun configTree(mutate: ObjectNode.() -> Unit = {}): ObjectNode {
         val tree = ConfigLoader.readTree(examplePath)
         val dr = tree.child("sources").child("dr")
         dr.put("dc", "test")
@@ -39,11 +50,7 @@ object ItFixtures {
         uat.putArray("hosts").add(ItCluster.uat.hostPort)
         tree.child("masking").child("key").put("ref", "\${env:CHREPL_IT_MASK_KEY}")
         tree.mutate()
-        val loaded = ConfigLoader.bind(tree)
-        val config = loaded.config ?: error("test config does not bind: ${loaded.issues}")
-        val errors = ConfigValidator().validate(config, examplePath.parent).issues.filter { it.severity == Severity.ERROR }
-        assertTrue(errors.isEmpty(), "test config is invalid: $errors")
-        return config
+        return tree
     }
 
     fun engine(config: ReplicatorConfig): MaskingEngine =

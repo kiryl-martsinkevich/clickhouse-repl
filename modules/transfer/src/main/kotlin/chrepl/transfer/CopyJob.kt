@@ -10,9 +10,9 @@ import chrepl.config.model.ShardMapping
 import chrepl.config.model.TableSpec
 import chrepl.config.validate.SecretReader
 import chrepl.masking.MaskingEngine
-import chrepl.masking.table.TableMasker
 import java.time.Duration
 import java.time.Instant
+import java.time.LocalDate
 import java.util.UUID
 
 /** Builds clients for configured hosts, resolving credentials from secret references. */
@@ -46,24 +46,42 @@ data class TableResult(
     val duration: Duration,
 )
 
+/** Schema of one table on the source and on every target host; enough to run chunks and assemblies. */
+data class TableContext(
+    val spec: TableSpec,
+    val source: TableInfo,
+    val targets: List<TableInfo>,
+) {
+    val database: String get() = source.database
+    val table: String get() = source.name
+}
+
+/** One target partition to rebuild: its chunks (possibly none, which empties it) on one target host. */
+data class PartitionWork(
+    val targetIndex: Int,
+    val partitionId: String,
+    val chunks: List<Chunk>,
+)
+
+/** A table ready to copy: context, selection, the metadata plan and the per-target-partition work. */
+data class PreparedTable(
+    val context: TableContext,
+    val selection: Selection,
+    val plan: TablePlan,
+    val work: List<PartitionWork>,
+)
+
 /**
- * Copies tables from the configured source to one target (SPEC §5): schema sync, planning, chunk
- * copies through the [ReadGate], partition assembly and bookkeeping in `repl_meta`. Sequential;
- * the control plane (PLAN M4) parallelises chunks across workers.
+ * The steps of copying tables from the configured source to one target (SPEC §5), usable
+ * sequentially ([CopyJob]) or distributed across workers (control plane, PLAN M4).
  */
-class CopyJob(
+class CopySession(
     private val config: ReplicatorConfig,
-    private val targetName: String,
+    val targetName: String,
     private val engine: MaskingEngine,
     private val gate: ReadGate,
     private val clients: ClientFactory = ClientFactory(),
     private val locks: PartitionLocks = PartitionLocks.IN_PROCESS,
-    val jobId: String = newJobId(),
-    private val requester: String = "cli",
-    private val configVersion: String = "local",
-    /** Pause before re-reading a pre-empted chunk; the guard also blocks until the source is GREEN again. */
-    private val retryBackoff: (attempt: Int) -> Duration = { Duration.ofSeconds(minOf(1L shl minOf(it - 1, 5), 30L)) },
-    private val listener: JobListener = JobListener.NONE,
 ) {
     private val sourceName = config.sources.keys.single()
     private val source = config.sources.getValue(sourceName)
@@ -78,28 +96,30 @@ class CopyJob(
         }
     }
 
-    private val sourceClients: Map<String, ClickHouseClient> by lazy {
+    val sourceClients: Map<String, ClickHouseClient> by lazy {
         source.shards.associate { it.name to clients.create(it.host, source.tls, source.reader.user, source.reader.password) }
     }
-    private val targetClients: List<ClickHouseClient> by lazy {
+    val targetClients: List<ClickHouseClient> by lazy {
         target.hosts.take(target.shards).map { clients.create(it, target.tls, target.writer.user, target.writer.password) }
     }
 
-    fun copy(
-        tableName: String,
-        cobDates: List<java.time.LocalDate> = emptyList(),
-    ): TableResult {
-        val started = Instant.now()
-        val spec = config.tables.firstOrNull { it.source == tableName } ?: throw IllegalArgumentException("no table spec for '$tableName'")
-        val selection =
-            when {
-                spec.fullCopy -> Selection.All
-                cobDates.isEmpty() -> throw IllegalArgumentException("$tableName is COB-sliced: give at least one COB date")
-                else -> Selection.Cob(cobDates.distinct().sorted())
-            }
-        val (database, table) = tableName.split('.', limit = 2)
+    fun spec(tableName: String): TableSpec =
+        config.tables.firstOrNull { it.source == tableName } ?: throw IllegalArgumentException("no table spec for '$tableName'")
 
-        // 1. Source schema, identical on every shard; masker compiled against it (fails on unclassified columns).
+    fun selection(
+        spec: TableSpec,
+        cobDates: List<LocalDate>,
+    ): Selection =
+        when {
+            spec.fullCopy -> Selection.All
+            cobDates.isEmpty() -> throw IllegalArgumentException("${spec.source} is COB-sliced: give at least one COB date")
+            else -> Selection.Cob(cobDates.distinct().sorted())
+        }
+
+    /** Reads the table's schema on the source (checking every shard agrees) and on the targets; writes nothing. */
+    fun context(tableName: String): TableContext {
+        val spec = spec(tableName)
+        val (database, table) = tableName.split('.', limit = 2)
         val infos =
             sourceClients.mapValues { (shard, client) ->
                 SchemaInspector.read(client, database, table) ?: throw SchemaException("$tableName does not exist on source shard $shard")
@@ -113,9 +133,40 @@ class CopyJob(
                 throw SchemaException("$tableName: schema on shard $shard differs from shard ${infos.keys.first()}")
             }
         }
-        val masker: TableMasker = engine.compile(spec, sourceInfo.columns)
+        val targets =
+            targetClients.map { client ->
+                SchemaInspector.read(client, database, table)
+                    ?: throw SchemaException("$tableName does not exist on target ${client.endpoint}")
+            }
+        return TableContext(spec, sourceInfo, targets)
+    }
 
-        // 2. Target safety on every host before anything is written, then bookkeeping tables and schema.
+    /**
+     * Steps 1–3 of a table copy: source schema (the masker compiles against it, so unclassified columns
+     * fail here), target safety on every host before any write, target schema, and the metadata plan.
+     */
+    fun prepare(
+        tableName: String,
+        cobDates: List<LocalDate>,
+    ): PreparedTable {
+        val spec = spec(tableName)
+        val selection = selection(spec, cobDates)
+        val (database, table) = tableName.split('.', limit = 2)
+        val infos =
+            sourceClients.mapValues { (shard, client) ->
+                SchemaInspector.read(client, database, table) ?: throw SchemaException("$tableName does not exist on source shard $shard")
+            }
+        val sourceInfo = infos.values.first()
+        SchemaInspector.requireCopyable(sourceInfo)
+        infos.forEach { (shard, info) ->
+            if (info.columns !=
+                sourceInfo.columns
+            ) {
+                throw SchemaException("$tableName: schema on shard $shard differs from shard ${infos.keys.first()}")
+            }
+        }
+        engine.compile(spec, sourceInfo.columns) // throws MaskingConfigException listing every problem
+
         targetClients.forEach { TargetMeta.checkMarker(it, targetName) }
         targetClients.forEach { TargetMeta.checkKeyVersion(it, database, table, engine.realm, engine.keyVersion) }
         val targetInfos =
@@ -124,81 +175,202 @@ class CopyJob(
                 SchemaSync.ensure(client, sourceInfo, target)
             }
 
-        // 3. Plan from metadata.
-        val maxChunk = spec.chunk?.maxBytes?.bytes ?: DEFAULT_CHUNK_BYTES
-        val plan = ChunkPlanner(maxChunk).plan(spec, sourceInfo, selection, sourceClients)
+        val plan = ChunkPlanner(spec.chunk?.maxBytes?.bytes ?: DEFAULT_CHUNK_BYTES).plan(spec, sourceInfo, selection, sourceClients)
         spec.maxFullCopyBytes?.let { cap ->
             if (plan.bytes > cap.bytes) throw SchemaException("$tableName is ${plan.bytes} bytes, above max_full_copy_bytes ${cap.bytes}")
         }
-
-        // 4. Copy chunks into staging, then assemble each target partition.
-        val copier = ChunkCopier(spec, sourceInfo, gate)
-        val assembler = PartitionAssembler(spec, locks)
-        val results = mutableListOf<PartitionResult>()
-        var rowsCopied = 0L
         val shardIndex = source.shards.map { it.name }
-        for ((targetIndex, targetClient) in targetClients.withIndex()) {
-            val targetInfo = targetInfos[targetIndex]
-            val shardPlans =
-                when (target.shardMapping) {
-                    ShardMapping.SAME_SHARDS -> plan.shards.filter { shardIndex.indexOf(it.shard) == targetIndex }
-                    else -> plan.shards
-                }
-            val sourcePartitions = shardPlans.flatMap { s -> s.partitions.map { it.partitionId } }.toSet()
-            // Target partitions holding the requested slice but absent at the source must be emptied too.
-            val partitions = (sourcePartitions + stalePartitions(targetClient, spec, targetInfo, selection)).sorted()
-            for (partitionId in partitions) {
-                val chunkStagings = mutableListOf<String>()
-                var partitionRows = 0L
-                val chunks = shardPlans.flatMap { s -> s.partitions.filter { it.partitionId == partitionId }.flatMap { it.chunks } }
-                for (chunk in chunks) {
-                    val staging = stagingName(table, chunkStagings.size.toString() + "_" + targetIndex)
-                    val sourceClient = sourceClients.getValue(chunk.shard)
-                    partitionRows +=
-                        copyWithRetry(chunk) { attempt ->
-                            copier.copy(
-                                chunk,
-                                sourceClient,
-                                targetClient,
-                                targetInfo,
-                                staging,
-                                masker,
-                                SourceQueries.queryId(jobId, chunk.id, attempt),
-                            )
-                        }
-                    chunkStagings += staging
-                }
-                val total =
-                    assembler.assemble(
-                        targetClient,
-                        targetInfo,
+        val work =
+            targetClients.indices.flatMap { targetIndex ->
+                val shardPlans =
+                    when (target.shardMapping) {
+                        ShardMapping.SAME_SHARDS -> plan.shards.filter { shardIndex.indexOf(it.shard) == targetIndex }
+                        else -> plan.shards
+                    }
+                val sourcePartitions = shardPlans.flatMap { s -> s.partitions.map { it.partitionId } }.toSet()
+                // Target partitions holding the requested slice (or, for full copies, any partition) must be rebuilt
+                // even when the source has nothing for them, so stale rows disappear.
+                val stale =
+                    ChunkPlanner(Long.MAX_VALUE)
+                        .plan(
+                            spec,
+                            targetInfos[targetIndex],
+                            selection,
+                            mapOf(
+                                "target" to targetClients[targetIndex],
+                            ),
+                        ).partitionIds
+                (sourcePartitions + stale).sorted().map { partitionId ->
+                    PartitionWork(
+                        targetIndex,
                         partitionId,
-                        selection,
-                        chunkStagings,
-                        stagingName(table, "p$targetIndex"),
+                        shardPlans.flatMap { s ->
+                            s.partitions.filter { it.partitionId == partitionId }.flatMap { it.chunks }
+                        },
                     )
-                TargetMeta.recordCopy(
-                    targetClient,
-                    CopyRecord(
-                        jobId,
-                        requester,
-                        database,
-                        table,
-                        partitionId,
-                        (selection as? Selection.Cob)?.dates ?: emptyList(),
-                        partitionRows,
-                        engine.realm,
-                        engine.keyVersion,
-                        configVersion,
-                        sourceDelay(shardPlans, database, table),
-                    ),
-                )
-                results += PartitionResult(targetClient.endpoint.toString(), partitionId, partitionRows, total)
-                rowsCopied += partitionRows
+                }
             }
-            TargetMeta.recordKeyVersion(targetClient, database, table, engine.realm, engine.keyVersion)
+        return PreparedTable(TableContext(spec, sourceInfo, targetInfos), selection, plan, work)
+    }
+
+    /** Copies one chunk into its own staging table on the target host; throws [PreemptedException] if the guard stops it. */
+    fun copyChunk(
+        context: TableContext,
+        targetIndex: Int,
+        chunk: Chunk,
+        staging: String,
+        queryId: String,
+    ): Long {
+        val masker = engine.compile(context.spec, context.source.columns)
+        return ChunkCopier(context.spec, context.source, gate).copy(
+            chunk,
+            sourceClients.getValue(chunk.shard),
+            targetClients[targetIndex],
+            context.targets[targetIndex],
+            staging,
+            masker,
+            queryId,
+        )
+    }
+
+    /** Rebuilds one target partition from chunk stagings and publishes it with REPLACE PARTITION. */
+    fun assemble(
+        context: TableContext,
+        targetIndex: Int,
+        partitionId: String,
+        selection: Selection,
+        chunkStagings: List<String>,
+        staging: String,
+        record: CopyRecord,
+    ): Long {
+        val client = targetClients[targetIndex]
+        val total =
+            PartitionAssembler(
+                context.spec,
+                locks,
+            ).assemble(client, context.targets[targetIndex], partitionId, selection, chunkStagings, staging)
+        TargetMeta.recordCopy(client, record.copy(sourceDelaySeconds = record.sourceDelaySeconds ?: sourceDelay(context)))
+        return total
+    }
+
+    fun finishTable(context: TableContext) =
+        targetClients.forEach {
+            TargetMeta.recordKeyVersion(it, context.database, context.table, engine.realm, engine.keyVersion)
         }
-        return TableResult(tableName, targetName, plan.chunks.size, rowsCopied, results, Duration.between(started, Instant.now()))
+
+    val realm: String get() = engine.realm
+    val keyVersion: Int get() = engine.keyVersion
+
+    fun targetHost(targetIndex: Int): String = targetClients[targetIndex].endpoint.toString()
+
+    /** Largest replication delay of the source table on DR (null when not replicated). */
+    private fun sourceDelay(context: TableContext): Long? =
+        sourceClients.values
+            .mapNotNull {
+                it
+                    .queryScalar(
+                        "SELECT max(absolute_delay) FROM system.replicas WHERE database = {db:String} AND table = {t:String} HAVING count() > 0",
+                        mapOf("param_db" to context.database, "param_t" to context.table),
+                    )?.toLongOrNull()
+            }.maxOrNull()
+
+    companion object {
+        val DEFAULT_CHUNK_BYTES: Long = 2L shl 30
+
+        /** Staging tables are named so that the janitor can recognise orphans (`__stg_<8 hex>_`). */
+        fun stagingName(
+            table: String,
+            jobId: String,
+            suffix: String,
+        ) = "${table}__stg_${jobId.takeLast(8)}_$suffix"
+    }
+}
+
+/**
+ * Copies tables to one target sequentially in this process (SPEC §5): the foreground path used by
+ * the CLI. The control plane runs the same [CopySession] steps distributed across workers.
+ */
+class CopyJob(
+    config: ReplicatorConfig,
+    targetName: String,
+    engine: MaskingEngine,
+    gate: ReadGate,
+    clients: ClientFactory = ClientFactory(),
+    locks: PartitionLocks = PartitionLocks.IN_PROCESS,
+    val jobId: String = newJobId(),
+    private val requester: String = "cli",
+    private val configVersion: String = "local",
+    /** Pause before re-reading a pre-empted chunk; the guard also blocks until the source is GREEN again. */
+    private val retryBackoff: (attempt: Int) -> Duration = { Duration.ofSeconds(minOf(1L shl minOf(it - 1, 5), 30L)) },
+    private val listener: JobListener = JobListener.NONE,
+) {
+    private val session = CopySession(config, targetName, engine, gate, clients, locks)
+
+    fun copy(
+        tableName: String,
+        cobDates: List<LocalDate> = emptyList(),
+    ): TableResult {
+        val started = Instant.now()
+        val prepared = session.prepare(tableName, cobDates)
+        val context = prepared.context
+        val results = mutableListOf<PartitionResult>()
+        var chunkSeq = 0
+        for (work in prepared.work) {
+            val stagings = mutableListOf<String>()
+            var rows = 0L
+            for (chunk in work.chunks) {
+                val staging = CopySession.stagingName(context.table, jobId, "c${chunkSeq++}")
+                rows +=
+                    copyWithRetry(
+                        chunk,
+                    ) { attempt ->
+                        session.copyChunk(
+                            context,
+                            work.targetIndex,
+                            chunk,
+                            staging,
+                            SourceQueries.queryId(jobId, chunk.id, attempt),
+                        )
+                    }
+                stagings += staging
+            }
+            val record =
+                CopyRecord(
+                    jobId,
+                    requester,
+                    context.database,
+                    context.table,
+                    work.partitionId,
+                    (prepared.selection as? Selection.Cob)?.dates ?: emptyList(),
+                    rows,
+                    session.realm,
+                    session.keyVersion,
+                    configVersion,
+                    null,
+                )
+            val total =
+                session.assemble(
+                    context,
+                    work.targetIndex,
+                    work.partitionId,
+                    prepared.selection,
+                    stagings,
+                    CopySession.stagingName(context.table, jobId, "p${chunkSeq++}"),
+                    record,
+                )
+            results += PartitionResult(session.targetHost(work.targetIndex), work.partitionId, rows, total)
+        }
+        session.finishTable(context)
+        return TableResult(
+            tableName,
+            session.targetName,
+            prepared.plan.chunks.size,
+            results.sumOf {
+                it.rowsCopied
+            },
+            results,
+            Duration.between(started, Instant.now()),
+        )
     }
 
     /** Pre-emptions are not failures: the chunk is re-read (into a fresh staging table) until it completes. */
@@ -218,41 +390,7 @@ class CopyJob(
         }
     }
 
-    /** For COB slices: target partitions containing the dates; for full copies: target partitions missing at the source. */
-    private fun stalePartitions(
-        client: ClickHouseClient,
-        spec: TableSpec,
-        info: TableInfo,
-        selection: Selection,
-    ): Set<String> {
-        val plan = ChunkPlanner(Long.MAX_VALUE).plan(spec, info, selection, mapOf("target" to client))
-        return plan.partitionIds
-    }
-
-    /** Largest replication delay of the source table on the shards read (null when not replicated). */
-    private fun sourceDelay(
-        shards: List<ShardPlan>,
-        database: String,
-        table: String,
-    ): Long? =
-        shards
-            .mapNotNull { s ->
-                sourceClients
-                    .getValue(s.shard)
-                    .queryScalar(
-                        "SELECT max(absolute_delay) FROM system.replicas WHERE database = {db:String} AND table = {t:String} HAVING count() > 0",
-                        mapOf("param_db" to database, "param_t" to table),
-                    )?.toLongOrNull()
-            }.maxOrNull()
-
-    private fun stagingName(
-        table: String,
-        suffix: String,
-    ) = "${table}__stg_${jobId.takeLast(8)}_$suffix"
-
     companion object {
-        val DEFAULT_CHUNK_BYTES: Long = 2L shl 30
-
         fun newJobId(): String =
             "j" +
                 UUID

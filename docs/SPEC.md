@@ -116,7 +116,7 @@ pre-emption cycle*.
  │ QA ─► Portal (React) ─► REST API ─► Job service ─► Planner ──────────┘               │           │
  │   OIDC                  ▲  CLI        ▲                                               │           │
  │                         │             │ Scheduler (continuous)                        │           │
- │                Config loader     Source Guard (leader): DR signals, DC-role check,   │           │
+ │                Config loader     Source Guard (per process): DR signals, DC-role,     │           │
  │                                  tokens, pre-emption ──────────────────────────────────┘           │
  │                                          │                                                        │
  │                              Postgres (jobs, chunks, leases, watermarks, audit, guard state)      │
@@ -136,13 +136,13 @@ pre-emption cycle*.
 | **Job service** | Validates requests (RBAC, quotas, policy completeness), creates jobs, coalesces duplicates. |
 | **Planner** | Turns a job into chunks per DR shard using **metadata only** (`system.parts`, `EXPLAIN ESTIMATE`). Never scans data. |
 | **Scheduler** | Creates continuous-mode and scheduled-refresh jobs on their intervals (§8). |
-| **Source Guard** | One active instance (leader election via Postgres advisory lock). Polls DR hosts, runs the DC-role check, computes GREEN/AMBER/RED, hands out admission tokens, triggers pre-emption (§4). |
+| **Source Guard** | Runs inside every process that touches DR (workers, and the API for estimates). Polls DR hosts, runs the DC-role check, computes GREEN/AMBER/RED, admits reads and pre-empts them (§4). Cluster-wide limits (`concurrency.global`, `per_host`) are leased read tokens in Postgres; the pause and failover flags are shared in Postgres. (M4 decision, replacing a single elected leader: each process gates and pre-empts its own reads directly, with no cross-process kill path and no leader failover gap. The cost is one small poll per DR host per process per `poll_interval`.) |
 | **Workers** | Claim chunks from the Postgres queue, obtain an admission token, stream → mask → write, heartbeat, finalise. |
 | **Postgres** | System of record for jobs, chunks, leases, watermarks, partition fingerprints, guard state history, "last copied" registry, audit log. |
 | **CLI** | `validate-config`, `dry-run` (plan + estimate, no data read), `submit`, `status`, `cancel`. |
 
 The control plane and workers are the **same artefact** started with different roles
-(`api`, `scheduler`, `guard`, `worker`, or `all` for local/dev). Postgres is the only
+(`api`, `worker`, `scheduler` from M5, or `all` for local/dev). Postgres is the only
 stateful dependency; there is no message broker.
 
 ### 3.2 Technology choices
@@ -150,10 +150,10 @@ stateful dependency; there is no message broker.
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
 | Language / runtime | Kotlin 2.x on JDK 21 (virtual threads) | Team preference (JVM); good streaming IO, mature crypto. |
-| Framework | Spring Boot 3.x (Web, Security/OIDC, Actuator) | OIDC, metrics and ops endpoints out of the box. |
+| Framework | Spring Boot 4.1 (Web MVC, OAuth2 resource server, Actuator), springdoc for OpenAPI | OIDC, metrics and ops endpoints out of the box. Boot 3.x reached end of OSS support in 2026. Jackson 3 at the HTTP layer; the domain modules use Jackson 2. |
 | ClickHouse client | Own minimal HTTP client (JDK `HttpClient`, never proxied) and RowBinary codec (`modules/clickhouse`) | Exact control of the value model, streaming reads and inserts, typed query parameters, per-query settings, `query_id` and cancellation; no dependency on a driver's type mapping. Chosen over `client-v2` in M2. |
 | ClickHouse versions | 25.8 (current), 26.8 (planned) | Both in the CI test matrix. |
-| State | PostgreSQL 15+, Flyway migrations, jOOQ | `FOR UPDATE SKIP LOCKED` queue, advisory locks, transactional audit. |
+| State | PostgreSQL 15+, Flyway migrations, plain JDBC (`modules/control`) | `FOR UPDATE SKIP LOCKED` queue, advisory locks, transactional audit. A thin JDBC helper replaced jOOQ: the queries are few, hand-tuned and Postgres-specific. |
 | Crypto | JCA HMAC-SHA256 / HKDF, Bouncy Castle (FF1 FPE) | Standard, FIPS-friendly primitives. |
 | Key management | v1 static key (secret file/env); later Fortanix DSM (BYOK) | §6.2. |
 | Config | YAML + JSON Schema, Jackson Kotlin module | Reviewable in git, validated in CI. |
@@ -285,7 +285,7 @@ Notes:
 
 ### 4.4 L3 — admission control
 
-The guard leader polls **each DR host directly** (never the active DC, never via
+Each guard instance polls **each DR host directly** (never the active DC, never via
 `clusterAllReplicas`) every `poll_interval` (default 5 s), with small fixed queries against
 in-memory system tables. An unreachable DR host is an explicit UNKNOWN signal.
 
@@ -652,6 +652,17 @@ with exponential backoff for transient errors; pre-emptions do not count as fail
 
 An OpenAPI spec is generated and published with the build. The portal uses only this API.
 
+Implementation notes (M4):
+
+- JSON uses snake_case names; null fields are omitted. Dates are ISO-8601.
+- `cob` is `{"dates": [...]}` or an inclusive calendar range `{"from": ..., "to": ...}` (at most 366 days, then the quota's `max_cob_dates_per_job`). Dates without data are no-ops, or empty the target slice with `replace`.
+- Errors are `{"error": code, "message": ...}`: 400 `bad_request`, 401 (no or invalid token), 403 `forbidden`, 404 `not_found`, 409 `confirm_overwrite_recent` (recent copy by someone else; resubmit with `confirm_overwrite_recent: true`), 422 `quota`.
+- `Idempotency-Key` header: a repeat from the same user returns the original job.
+- `GET /api/v1/me` returns the caller's user, groups and effective roles (portal and CLI use it).
+- The pause and failover flags also stop workers from planning or starting chunks, even for unguarded `dc: test` sources. Planning waits while the guard is not GREEN or AMBER; such jobs show the guard's reason as `wait_reason` while PENDING.
+- The active config version lives in Postgres, so a reload through any API replica applies to every process within 5 s. Source and guard settings are read at startup, so changing them needs a restart.
+- `/api/v1/continuous*` arrive with M5.
+
 ### 7.6 Later: restricted custom filters
 
 Power users may later supply an extra filter (`WHERE region = 'EU'`) in addition to the COB,
@@ -748,7 +759,7 @@ A complete, annotated example is in [`docs/examples/replicator.yaml`](examples/r
 | Masking keys | Only in worker memory; static key from a mounted secret (v1), Fortanix DSM unwrap (later); never logged, never sent to ClickHouse; audit records version only. |
 | Data at rest on workers | None (streaming). If spill-to-disk is ever enabled, it holds masked data only, encrypted with an ephemeral key. |
 | Transport | TLS to DR, targets, Postgres, key store; portal over HTTPS. |
-| Portal | OIDC, CSRF protection, RBAC on every API call, no query text or raw source data shown. |
+| Portal | OIDC, RBAC on every API call, no query text or raw source data shown. The API is stateless and accepts bearer tokens only (no cookies), so CSRF does not apply; the SPA keeps its token in memory. |
 | Audit | Append-only audit table: requester, job, tables, partitions, COB, target, rows, bytes, config version, key version, DR delay, guard decisions. Exportable to SIEM. |
 | Supply chain | Pinned dependencies, SBOM, image scanning in CI. |
 
@@ -773,7 +784,7 @@ A complete, annotated example is in [`docs/examples/replicator.yaml`](examples/r
 | Keeper session lost on DR / replica readonly | `is_readonly` / `is_session_expired` → RED. |
 | Active DC down (DR not yet promoted) | DR fetches fail → replication-queue errors → RED. |
 | Worker crashes mid-chunk | Lease expires (default 60 s); chunk re-queued; staging table truncated on retry. |
-| Guard leader dies | Tokens expire within lease; standby acquires the advisory lock; state UNKNOWN (no reads) until the first successful poll round. |
+| Worker process dies | Its read tokens and chunk leases expire; other workers take the chunks over. A restarted process's guard starts UNKNOWN (no reads) until its first successful poll round. |
 | DR host unreachable | That host UNKNOWN → its shard blocked; with `fail_closed_scope: cluster` (default) all reads stop. |
 | Target down / out of disk | Chunk fails with transient error, retried with backoff; job FAILED after attempts exhausted. |
 | Schema drift at source | Job BLOCKED (`SCHEMA_DRIFT` / `UNCLASSIFIED_COLUMN`) until config updated. |

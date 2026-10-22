@@ -179,7 +179,7 @@ Scope
 - Pre-emption: connection cancel + `KILL QUERY … ASYNC` backstop restricted to `repl_reader` and the chunk's `query_id`.
 - Blackout windows, global pause, circuit breaker; runtime DNS re-check against the active-DC deny-list.
 - Wait-reason rendering (host, signal, value, threshold — never query text).
-- Guard leader election (Postgres advisory lock) and failover.
+- ~~Guard leader election~~ (replaced in M4 by a guard per process with Postgres read tokens; SPEC §3.1).
 - Wire the guard into the M2 pipeline.
 
 Exit criteria (Testcontainers, with the load generator)
@@ -194,7 +194,35 @@ Exit criteria (Testcontainers, with the load generator)
 - **Zero contact with "prod"**: its `query_log` and connection metrics show no `repl_*` activity across the whole M3 suite.
 - Security review of the guard and the DR provisioning files.
 
-### M4 — Control plane: jobs, workers, REST API (M/L)
+### M4 — Control plane: jobs, workers, REST API (M/L) — ✅ done
+
+Delivered:
+- `modules/control`: the Postgres schema (Flyway) and the job service: catalog, estimates, submission with RBAC, quotas, idempotency, coalescing and the recent-copy confirmation. Plus the worker, which handles planning, `SKIP LOCKED` chunk claims with weighted queues and per-user caps, leases with heartbeats, pre-emption accounting, partition assembly under advisory locks, finalisation, cancellation and the reaper. Also the registry (Postgres plus `repl_meta.copy_history`), the audit log in the same transaction, Postgres-backed pause/failover flags, and leased read tokens.
+- `modules/app`: Spring Boot 4.1 app with process roles `api`/`worker`/`all`, the REST API from SPEC §7.5 (plus `GET /me`), an OAuth2/OIDC resource server (JWT user and groups claims are configurable), OpenAPI at `/v3/api-docs`, and health probes.
+- The CLI gained `submit` (with `--wait`), `dry-run`, `status`, `jobs` and `cancel` against the API.
+- Tests:
+  - 8 control-plane ITs;
+  - 6 API ITs (Spring app, real JWT validation, CLI end to end);
+  - a guarded control-plane IT on the prod/DR topology (in GuardIT);
+  - CLI unit tests against a stub server.
+
+Found while building and testing (all fixed and covered):
+1. Planning read DR metadata whatever the guard state. Planning now waits unless the guard is GREEN or AMBER, and the job shows the guard's reason while PENDING.
+2. The global pause did not stop unguarded (`dc: test`) sources. Workers now check the pause/failover flags before planning or claiming a chunk.
+3. The active config version was per process, so a reload through one API replica was invisible to the others. It now lives in Postgres.
+4. The generated OpenAPI schema used camelCase while the API speaks snake_case.
+
+Deviations:
+- No single guard leader: every process that touches DR runs its own guard; global limits are Postgres read tokens (SPEC §3.1).
+- Plain JDBC instead of jOOQ.
+- Spring Boot 4.1 instead of 3.x.
+
+Not done in M4 (moved):
+- The `watermarks`/`fingerprints` tables (M5).
+- `guard_state_history` and Prometheus metrics (M7).
+- Completion notifications/webhooks (Q7).
+- The worker-crash IT simulates the crash: a chunk is left RUNNING under a dead worker whose lease has expired. Killing a real worker process, and behaviour during a Postgres outage, move to the M7 chaos tests.
+
 
 Scope
 - Postgres schema (Flyway): `jobs`, `chunks`, `partition_tasks`, `leases`, `tokens`, `watermarks`, `fingerprints`, `guard_state_history`, `copy_registry`, `audit_log`, `config_versions`, `ops_flags` (pause, failover).
