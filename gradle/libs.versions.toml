@@ -4,6 +4,11 @@ jackson = "2.22.4"
 clikt = "5.1.0"
 junit = "6.1.3"
 ktlint-gradle = "14.2.0"
+bouncycastle = "1.86"
+kotest = "6.2.6"
+coroutines = "1.11.0"
+jmh = "1.37"
+jmhPlugin = "0.7.3"
 
 [libraries]
 kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
@@ -16,3 +21,11 @@ clikt = { module = "com.github.ajalt.clikt:clikt", version.ref = "clikt" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+bouncycastle = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
+kotest-property = { module = "io.kotest:kotest-property", version.ref = "kotest" }
+coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+jmh-core = { module = "org.openjdk.jmh:jmh-core", version.ref = "jmh" }
+jmh-generator = { module = "org.openjdk.jmh:jmh-generator-bytecode", version.ref = "jmh" }
+
+[plugins]
+jmh = { id = "me.champeau.jmh", version.ref = "jmhPlugin" }

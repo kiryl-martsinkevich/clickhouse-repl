@@ -92,7 +92,16 @@ Exit criteria
 - Example config validates.
 - Negative fixtures each fail with the expected error: missing column policy, masked partition key, source host in `active_dc.hosts`, target host resolving into `active_dc.cidrs`, source without `dc: dr`, literal masking key, unknown domain, pre-emption disabled.
 
-### M1 — Masking engine (M)
+### M1 — Masking engine (M) — ✅ done
+
+Delivered: `modules/masking` — static key provider and HKDF key derivation, all ten strategies,
+ClickHouse type parser and nested types (Nullable, LowCardinality, Array, Tuple, Map keys/values,
+JSON paths and the JSON type), compiled per-table maskers with entity lookups, LRU cache and
+per-chunk collision checks; 34 tests including property tests; JMH benchmarks. Throughput: ≈ 258 MB/s
+per core on realistic trades-like rows, ≈ 20 MB/s worst case with every FF1 key distinct (see SPEC
+§6.5). Config gained `width` for `fpe_ff1` over digits (SPEC §6.3.1). Formal security review of key
+handling and strategies is still to be done by the reviewer.
+
 
 Scope
 - `MasterKeyProvider` interface; **`static` provider** (≥ 256-bit key from a secret file/env, versioned); test provider. Keys held in memory only, zeroed on shutdown, never logged (log-redaction test).

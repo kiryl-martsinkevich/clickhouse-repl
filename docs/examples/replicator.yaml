@@ -145,6 +145,7 @@ masking:
     customer_id:
       strategy: fpe_ff1                      # bijective: stays unique (used as a key)
       alphabet: digits
+      width: 12                              # customer ids are integers below 10^12
       approved_by: repo-owner                # required for fpe_ff1
     account_number:
       strategy: tokenize

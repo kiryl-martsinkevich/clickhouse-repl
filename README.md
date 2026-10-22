@@ -9,7 +9,7 @@ environments (QA, UAT, perf), with consistent masking of sensitive columns.
 - **Ad-hoc mode**: QA users request a table or dataset for a COB date from a web portal, and the job runs in the background.
 - **Production first**: reads come only from the passive DR datacentre — the active DC is never contacted. A Source Guard admits reads only while DR replication is healthy, pre-empts them when it falls behind, stops immediately if DR becomes active, and fails closed.
 
-Status: M0 (configuration model and validation) implemented; see the plan for what comes next.
+Status: M0 (configuration) and M1 (masking engine) implemented; see the plan for what comes next.
 
 Docs:
 
@@ -51,5 +51,6 @@ into the config (e.g. `sources.dr.shards[0].host`).
 | Path | Contents |
 |------|----------|
 | `modules/config` | Configuration model, YAML loader, semantic validation (SPEC §9). |
+| `modules/masking` | Masking engine: keys, strategies, type-aware table maskers (SPEC §6). `./gradlew :masking:jmh` runs the benchmarks. |
 | `modules/cli` | `clickhouse-repl` command-line tool. |
 | `build-logic` | Shared Gradle conventions (Kotlin, JDK 21 toolchain, ktlint, JUnit). |

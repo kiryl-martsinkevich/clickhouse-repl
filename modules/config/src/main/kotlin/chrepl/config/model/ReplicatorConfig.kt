@@ -185,6 +185,8 @@ data class Domain(
     val length: Int? = null,
     // fpe_ff1
     val alphabet: String? = null,
+    /** Digits only: values are integers in [0, 10^width). */
+    val width: Int? = null,
     // email
     val localPart: EmailLocalPart? = null,
     val domain: EmailDomainMode? = null,

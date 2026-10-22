@@ -1,13 +1,11 @@
 package chrepl.config.validate
 
+import chrepl.config.model.Alphabets
 import chrepl.config.model.Domain
+import chrepl.config.model.KeyEncoding
 import chrepl.config.model.SecretRef
 import chrepl.config.model.Strategy
-import java.util.Base64
 import kotlin.io.path.exists
-
-private const val MIN_KEY_BYTES = 32
-private val ALPHABETS = setOf("digits", "lower", "upper", "alpha", "alphanumeric", "hex")
 
 /** Options each strategy requires, and the ones it additionally accepts (SPEC §6.3). */
 private class StrategyOptions(
@@ -21,7 +19,7 @@ private val STRATEGY_OPTIONS =
     mapOf(
         Strategy.HASH to StrategyOptions(emptySet(), setOf("encoding", "length", "collision_check")),
         Strategy.TOKENIZE to StrategyOptions(emptySet(), setOf("collision_check")),
-        Strategy.FPE_FF1 to StrategyOptions(setOf("alphabet", "approved_by")),
+        Strategy.FPE_FF1 to StrategyOptions(setOf("alphabet", "approved_by"), setOf("width")),
         Strategy.EMAIL to StrategyOptions(setOf("local_part", "domain"), setOf("collision_check")),
         Strategy.DICTIONARY to StrategyOptions(setOf("dictionary")),
         Strategy.DATE_SHIFT to StrategyOptions(setOf("max_days")),
@@ -72,27 +70,19 @@ private fun RuleContext.checkKey() {
         return
     }
     val value = checkSecret(ref, "masking.key.ref") ?: return
-    val bytes = decodeKey(value)
+    val bytes = KeyEncoding.decode(value)
     if (bytes == null) {
         error(Code.KEY_REF, "masking.key.ref", "key ${keyName(ref)} is neither hex nor base64")
-    } else if (bytes.size < MIN_KEY_BYTES) {
+    } else if (bytes.size < KeyEncoding.MIN_BYTES) {
         error(
             Code.KEY_TOO_SHORT,
             "masking.key.ref",
-            "key ${keyName(ref)} has ${bytes.size * 8} bits; at least ${MIN_KEY_BYTES * 8} are required",
+            "key ${keyName(ref)} has ${bytes.size * 8} bits; at least ${KeyEncoding.MIN_BYTES * 8} are required",
         )
     }
 }
 
 private fun keyName(ref: SecretRef) = ref.toString()
-
-private fun decodeKey(value: String): ByteArray? {
-    val text = value.trim()
-    if (text.length % 2 == 0 && text.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
-        return text.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-    }
-    return runCatching { Base64.getDecoder().decode(text) }.getOrNull()
-}
 
 private fun RuleContext.checkDomain(
     path: String,
@@ -115,7 +105,25 @@ private fun RuleContext.checkDomain(
 
     domain.approvedBy?.let { if (it.isBlank()) invalid("approved_by", "approved_by must name an approver") }
     domain.length?.let { if (it < 8) invalid("length", "hash length must be at least 8 characters") }
-    domain.alphabet?.let { if (it !in ALPHABETS) invalid("alphabet", "unknown alphabet '$it' (allowed: ${ALPHABETS.joinToString()})") }
+    domain.alphabet?.let {
+        if (it !in Alphabets.BY_NAME) invalid("alphabet", "unknown alphabet '$it' (allowed: ${Alphabets.BY_NAME.keys.joinToString()})")
+    }
+    if (domain.strategy == Strategy.FPE_FF1) {
+        val width = domain.width
+        when {
+            domain.alphabet == Alphabets.DIGITS && width == null -> {
+                error(Code.STRATEGY_OPTION_MISSING, "$path.width", "fpe_ff1 over digits needs width (${Alphabets.DIGIT_WIDTHS})")
+            }
+
+            domain.alphabet == Alphabets.DIGITS && width !in Alphabets.DIGIT_WIDTHS -> {
+                invalid("width", "width must be in ${Alphabets.DIGIT_WIDTHS} (NIST minimum domain 10^6, at most Int64 range)")
+            }
+
+            domain.alphabet != Alphabets.DIGITS && width != null -> {
+                error(Code.STRATEGY_OPTION_UNSUPPORTED, "$path.width", "width applies only to alphabet: digits")
+            }
+        }
+    }
     domain.dictionary?.let {
         if (it !in config.masking.dictionaries) error(Code.UNKNOWN_DICTIONARY, "$path.dictionary", "unknown dictionary '$it'")
     }
@@ -137,6 +145,7 @@ private fun presentOptions(domain: Domain): Set<String> =
         if (domain.encoding != null) add("encoding")
         if (domain.length != null) add("length")
         if (domain.alphabet != null) add("alphabet")
+        if (domain.width != null) add("width")
         if (domain.localPart != null) add("local_part")
         if (domain.domain != null) add("domain")
         if (domain.dictionary != null) add("dictionary")

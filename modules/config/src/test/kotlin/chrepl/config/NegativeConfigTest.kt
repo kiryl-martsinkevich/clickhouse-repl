@@ -123,6 +123,15 @@ class NegativeConfigTest {
                 Case("fpe_ff1 without approval", Code.STRATEGY_OPTION_MISSING, "masking.domains.customer_id.approved_by") {
                     obj("/masking/domains/customer_id").remove("approved_by")
                 },
+                Case("fpe_ff1 over digits without width", Code.STRATEGY_OPTION_MISSING, "masking.domains.customer_id.width") {
+                    obj("/masking/domains/customer_id").remove("width")
+                },
+                Case("fpe_ff1 width out of range", Code.STRATEGY_OPTION_INVALID, "masking.domains.customer_id.width") {
+                    obj("/masking/domains/customer_id").put("width", 20)
+                },
+                Case("width with a non-digit alphabet", Code.STRATEGY_OPTION_UNSUPPORTED, "masking.domains.customer_id.width") {
+                    obj("/masking/domains/customer_id").put("alphabet", "alphanumeric")
+                },
                 Case("option that does not apply to the strategy", Code.STRATEGY_OPTION_UNSUPPORTED, "masking.domains.phone.max_days") {
                     obj("/masking/domains/phone").put("max_days", 5)
                 },
@@ -138,6 +147,7 @@ class NegativeConfigTest {
                     "masking.dictionaries.first_names.file",
                     options = ValidationOptions(checkFiles = true),
                 ) {
+                    obj("/masking/dictionaries/first_names").put("file", "dictionaries/absent.txt")
                 },
                 // --- tables
                 Case("table name without database", Code.TABLE_NAME, "tables[0].source") {

@@ -528,7 +528,7 @@ for reviewer attention. It is advisory only.
 |----------|---------------|--------|-------------|
 | `hash` | yes | hex / base64 of HMAC, optionally truncated to N chars | opaque identifiers where format doesn't matter |
 | `tokenize` | yes | format-preserving: digits → digits, letters → letters (case kept), separators and length kept | account numbers, phone numbers, IDs |
-| `fpe_ff1` | yes, **bijective** | NIST FF1 format-preserving encryption over a configured alphabet | identifiers that must stay **unique** (keys) — reversible by key holders, so restricted to approved domains |
+| `fpe_ff1` | yes, **bijective** | NIST FF1 format-preserving encryption (§6.3.1) | identifiers that must stay **unique** (keys) — reversible by key holders, so restricted to approved domains |
 | `email` | yes | `tokenize(local)@<domain-mode>`; domain kept, mapped to `example.com`, or tokenized | emails |
 | `dictionary` | yes | value from a versioned dictionary, index = HMAC mod size | names, cities, company names |
 | `date_shift` | yes (per entity) | date ± offset; offset = HMAC(entity value) mod (2·max_days+1) − max_days | dates of birth, event dates — intervals within one entity preserved |
@@ -536,6 +536,18 @@ for reviewer attention. It is advisory only.
 | `partial` | n/a | keep first/last N characters, replace the rest with a mask char | display values |
 | `null` | n/a | NULL (Nullable) or type default | free text, notes |
 | `constant` | n/a | fixed literal | values that must exist but carry no meaning |
+
+#### 6.3.1 Strategy details (as implemented in M1)
+
+- **`tokenize`**: a keystream is derived from HMAC(domain key, canonical value), so equal inputs give equal outputs. Per character: ASCII digits stay digits and the first digit of a digit run stays non-zero if it was non-zero (a leading `0` stays `0`); ASCII letters keep their case; other letters (é, Ж, …) become ASCII letters of the same case, so non-Latin names do not leak through unchanged; separators, spaces and punctuation are kept. Integers are tokenized through their decimal text (sign kept), so an integer and its decimal string mask identically.
+- **`fpe_ff1`** (NIST SP 800-38G FF1, AES-256 key derived per domain, empty tweak):
+  - `alphabet: digits` requires `width: W` (6–19). Values are non-negative integers below 10^W, from integer columns or digit-only strings, encrypted as a W-digit block; the output is an integer below 10^W. Integer and string columns therefore agree (string outputs carry no leading zeros). The column type must hold 10^W − 1 (e.g. W ≤ 9 for UInt32), checked when the table masker is compiled. Negative values, non-digit strings and values ≥ 10^W fail the chunk.
+  - Other alphabets (`alphanumeric`, `hex`, …) encrypt the string over the alphabet, keeping its length; every character must be in the alphabet and the length must reach the NIST minimum domain (radix^length ≥ 10^6, e.g. 4 characters for alphanumeric).
+- **`email`**: split at the last `@`; the local part is tokenized (or hashed to 12 hex characters) seeded by the whole normalised address; the domain is kept, mapped to `example.com`, or tokenized label-wise keeping the TLD. Strings without a usable `@` are tokenized whole.
+- **`hash`**: HMAC as hex or URL-safe base64, truncated to `length` (and to a FixedString's length); on integer columns the HMAC is reduced into the type range; on UUID columns its first 16 bytes form the UUID.
+- **`date_shift` / `numeric_noise`**: seeded by the entity column's original (unmasked) value, or by the value itself when no entity column is set or the entity is NULL. Results are clamped to the type range (e.g. Date 1970-01-01…2149-06-06).
+- **JSON (`json_paths` and `JSON` columns)**: paths are `$.a.b`, `$.a[*].b` or `$.a[3]`; a policy on an object or array applies to every scalar beneath it, and `default` covers everything else. String leaves are masked as `String`, integer leaves as integers, floating leaves as `Float64`; booleans are kept. A value that is not valid JSON fails the chunk. Output JSON is re-serialised compactly (key order kept).
+- **Normalisation** (`normalise: [trim, lower, nfc]`) is applied to string inputs before masking; canonical text is always NFC.
 
 `tokenize` and `hash` are not bijective: collisions are possible on small value spaces. For
 columns that must remain unique, use `fpe_ff1`, or enable `collision_check: true` on the domain
@@ -549,7 +561,9 @@ derivation, so all dates of the same customer shift by the same offset everywher
 ### 6.4 Types
 
 - Supported: all integer widths, Decimal, Float, String, FixedString, Date/Date32/DateTime/DateTime64, UUID, IPv4/IPv6, Enum (pass or `constant` only), and wrappers `Nullable`, `LowCardinality`, `Array(T)`, `Map(K, V)` (mask keys and/or values), `Tuple(...)` (per element), the `JSON` type and JSON-in-String via path selectors (`$.contact.email`).
-- Masking is **type-preserving**: output fits the column type (length for FixedString, range for integers, scale for Decimal). Integer `tokenize` keeps the digit count and a non-zero leading digit; if the result would overflow the type, it is reduced modulo the type's range (documented loss of cross-type consistency for 20-digit UInt64 values).
+- Masking is **type-preserving**: output fits the column type (length for FixedString, range for integers, scale for Decimal). Integer `tokenize` keeps the digit count and a non-zero leading digit; if the result would overflow the type it is re-derived up to 8 times and only then reduced modulo the type's range (a rare, documented loss of cross-type consistency near the type's maximum).
+- The engine works on plain JVM values (e.g. `UInt64` as `BigInteger`, `Date` as `LocalDate`, `Map` as an ordered map); the mapping is documented on `chrepl.masking.types.ChType` and the transfer layer (M2) converts rows accordingly.
+- Column types are checked against strategies when a table masker is compiled from the real schema; every incompatibility, unclassified column or missing column is reported at once and blocks the job.
 - NULL in → NULL out (unless strategy is `constant`).
 
 ### 6.5 Performance
@@ -557,6 +571,7 @@ derivation, so all dates of the same customer shift by the same offset everywher
 - Masking is CPU-bound in the worker, never on ClickHouse.
 - Per-domain LRU caches (`value → masked`) exploit the high repetition of IDs in fact tables.
 - Target throughput per worker: ≥ 50 MB/s uncompressed for typical tables. The L1 bandwidth cap is the bottleneck by design.
+- Measured in M1 (JMH, one thread, trades-like rows of ~185 bytes from the example config): **≈ 258 MB/s** with realistic repetition of customers/accounts (LRU cache hits); **≈ 20 MB/s** in the worst case where every masked value is distinct and caching is off, dominated by FF1 (≈ 200k values/s per core, AES-bound). A fact table whose FF1-masked key never repeats therefore needs 2–3 cores per 50 MB/s read; other strategies run at 1–3 M values/s.
 
 ---
 
