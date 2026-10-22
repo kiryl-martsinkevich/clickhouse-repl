@@ -8,8 +8,8 @@ import chrepl.masking.keys.Hkdf
 import chrepl.masking.keys.KeyLoadException
 import chrepl.masking.keys.MasterKey
 import chrepl.masking.keys.StaticKeyProvider
-import chrepl.masking.types.ChType
-import chrepl.masking.types.TypeParser
+import chrepl.types.ChType
+import chrepl.types.TypeParser
 import org.junit.jupiter.api.Test
 import java.util.HexFormat
 import kotlin.test.assertContentEquals

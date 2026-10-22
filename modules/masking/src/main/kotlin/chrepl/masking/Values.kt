@@ -1,8 +1,8 @@
 package chrepl.masking
 
 import chrepl.config.model.Normaliser
-import chrepl.masking.types.ChType
-import chrepl.masking.types.scalar
+import chrepl.types.ChType
+import chrepl.types.scalar
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.net.InetAddress

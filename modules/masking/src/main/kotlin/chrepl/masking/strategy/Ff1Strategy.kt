@@ -4,7 +4,7 @@ import chrepl.config.model.Alphabets
 import chrepl.masking.MaskingException
 import chrepl.masking.box
 import chrepl.masking.toBigIntegerValue
-import chrepl.masking.types.ChType
+import chrepl.types.ChType
 import org.bouncycastle.crypto.fpe.FPEFF1Engine
 import org.bouncycastle.crypto.params.FPEParameters
 import org.bouncycastle.crypto.params.KeyParameter

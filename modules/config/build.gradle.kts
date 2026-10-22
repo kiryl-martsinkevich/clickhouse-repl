@@ -6,7 +6,7 @@ plugins {
 dependencies {
     api(platform(libs.jackson.bom))
     api(libs.jackson.databind)
-    implementation(libs.jackson.yaml)
+    api(libs.jackson.yaml)
     implementation(libs.jackson.kotlin)
 
     testImplementation(platform(libs.junit.bom))

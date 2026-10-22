@@ -10,9 +10,9 @@ import chrepl.masking.defaultValue
 import chrepl.masking.strategy.ConstantStrategy
 import chrepl.masking.strategy.DateShiftStrategy
 import chrepl.masking.strategy.NumericNoiseStrategy
-import chrepl.masking.types.ChType
-import chrepl.masking.types.isNullable
-import chrepl.masking.types.scalar
+import chrepl.types.ChType
+import chrepl.types.isNullable
+import chrepl.types.scalar
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.BigIntegerNode

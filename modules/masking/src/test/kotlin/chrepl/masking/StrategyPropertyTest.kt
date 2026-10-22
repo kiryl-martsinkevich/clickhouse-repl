@@ -8,7 +8,7 @@ import chrepl.config.model.Strategy
 import chrepl.masking.MaskingFixtures.engine
 import chrepl.masking.MaskingFixtures.single
 import chrepl.masking.strategy.Ff1Strategy
-import chrepl.masking.types.ChType
+import chrepl.types.ChType
 import io.kotest.property.Arb
 import io.kotest.property.arbitrary.bigDecimal
 import io.kotest.property.arbitrary.element

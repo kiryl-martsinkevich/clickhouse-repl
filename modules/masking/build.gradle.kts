@@ -6,6 +6,7 @@ plugins {
 
 dependencies {
     api(project(":config"))
+    api(project(":types"))
     implementation(libs.bouncycastle)
     implementation(platform(libs.jackson.bom))
     implementation(libs.jackson.databind)

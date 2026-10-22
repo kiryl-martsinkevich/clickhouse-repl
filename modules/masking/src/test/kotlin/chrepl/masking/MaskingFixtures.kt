@@ -10,7 +10,7 @@ import chrepl.config.model.TableSpec
 import chrepl.masking.keys.MasterKey
 import chrepl.masking.table.ColumnSchema
 import chrepl.masking.table.TableMasker
-import chrepl.masking.types.TypeParser
+import chrepl.types.TypeParser
 
 /** Builds engines and table maskers for tests from a fixed, test-only key. */
 object MaskingFixtures {

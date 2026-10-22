@@ -151,7 +151,7 @@ stateful dependency; there is no message broker.
 |---------|--------|-----------|
 | Language / runtime | Kotlin 2.x on JDK 21 (virtual threads) | Team preference (JVM); good streaming IO, mature crypto. |
 | Framework | Spring Boot 3.x (Web, Security/OIDC, Actuator) | OIDC, metrics and ops endpoints out of the box. |
-| ClickHouse client | `com.clickhouse:client-v2` (HTTP, streaming `RowBinaryWithNamesAndTypes`) | Official client, streaming read and insert, per-query settings and `query_id`. |
+| ClickHouse client | Own minimal HTTP client (JDK `HttpClient`, never proxied) and RowBinary codec (`modules/clickhouse`) | Exact control of the value model, streaming reads and inserts, typed query parameters, per-query settings, `query_id` and cancellation; no dependency on a driver's type mapping. Chosen over `client-v2` in M2. |
 | ClickHouse versions | 25.8 (current), 26.8 (planned) | Both in the CI test matrix. |
 | State | PostgreSQL 15+, Flyway migrations, jOOQ | `FOR UPDATE SKIP LOCKED` queue, advisory locks, transactional audit. |
 | Crypto | JCA HMAC-SHA256 / HKDF, Bouncy Castle (FF1 FPE) | Standard, FIPS-friendly primitives. |
@@ -159,7 +159,7 @@ stateful dependency; there is no message broker.
 | Config | YAML + JSON Schema, Jackson Kotlin module | Reviewable in git, validated in CI. |
 | Portal | React 18 + TypeScript + Vite + TanStack Query | Simple SPA; served by the control plane. |
 | Observability | Micrometer → Prometheus, OpenTelemetry traces, structured JSON logs | |
-| Tests | JUnit 5, Kotest property tests, Testcontainers (Keeper + ClickHouse "prod"/"DR" replica pair + target, Postgres), Playwright | Real replication in tests. |
+| Tests | JUnit, kotest-property, Docker-based integration tests (`modules/it`, driven through the `docker` CLI) against real ClickHouse 25.8 and 26.8, Playwright | Real servers in tests; no Testcontainers dependency (Docker Engine 29 compatibility). |
 | Deployment | Container image, Kubernetes (Helm chart) with strict egress NetworkPolicy | 2× api/scheduler/guard, N× workers. |
 
 ---
@@ -398,6 +398,14 @@ JVM, and stream into the target with `INSERT … FORMAT RowBinary`. Masking keys
 worker memory. Raw source data is never written to worker disk; buffers are bounded and
 backpressure flows from target insert to source read.
 
+Details settled in M2:
+
+- Strings that are not valid UTF-8 are carried as raw bytes, so pass-through columns are copied byte for byte; masking such a value fails the chunk.
+- `JSON` columns travel as strings (`output_format_binary_write_json_as_string` / `input_format_binary_read_json_as_string`).
+- A query that fails mid-stream aborts the chunked HTTP response; the client reports it as an error, never as a short result.
+- All markers of a target are checked before anything is written to any of its hosts.
+- `table_overrides.ttl` is applied to newly created target tables when every column it references exists.
+
 ### 5.2 Schema synchronisation
 
 1. Read `SHOW CREATE TABLE db.t` and `system.columns` from one DR replica (all shards share the schema; the planner checks the other two for drift).
@@ -465,7 +473,7 @@ Constraints and validation:
 | Target topology | `shard_mapping` | Behaviour |
 |-----------------|-----------------|-----------|
 | 3 shards | `same_shards` (default when shard counts match) | DR shard *i* → target shard *i*; staging and REPLACE run on target shard *i*. Data distribution mirrors prod. |
-| Different shard count | `distributed` | Rows are inserted into staging on the shard chosen by the target's sharding key, computed in the worker; REPLACE per target shard. |
+| Different shard count | `distributed` | Rows are inserted into staging on the shard chosen by the target's sharding key, computed in the worker; REPLACE per target shard. **Not implemented yet** (needs the sharding expression evaluated in the worker); jobs with this mapping are refused. |
 | Single node | `single` | All three source shards' chunks land in one staging table per partition; one REPLACE. |
 
 If a **masked column is part of the sharding key**, `same_shards` keeps rows on their

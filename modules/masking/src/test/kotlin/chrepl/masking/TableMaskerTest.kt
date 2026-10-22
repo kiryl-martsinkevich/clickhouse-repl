@@ -11,7 +11,7 @@ import chrepl.masking.MaskingFixtures.mask
 import chrepl.masking.MaskingFixtures.masker
 import chrepl.masking.keys.StaticKeyProvider
 import chrepl.masking.table.ColumnSchema
-import chrepl.masking.types.TypeParser
+import chrepl.types.TypeParser
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal

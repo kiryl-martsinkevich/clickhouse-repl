@@ -1,4 +1,4 @@
-package chrepl.masking.types
+package chrepl.types
 
 import java.math.BigInteger
 

@@ -10,8 +10,8 @@ import chrepl.masking.keys.MasterKey
 import chrepl.masking.keys.StaticKeyProvider
 import chrepl.masking.table.ColumnSchema
 import chrepl.masking.table.TableMasker
-import chrepl.masking.types.ChType
-import chrepl.masking.types.TypeParser
+import chrepl.types.ChType
+import chrepl.types.TypeParser
 import org.openjdk.jmh.annotations.Benchmark
 import org.openjdk.jmh.annotations.BenchmarkMode
 import org.openjdk.jmh.annotations.Level

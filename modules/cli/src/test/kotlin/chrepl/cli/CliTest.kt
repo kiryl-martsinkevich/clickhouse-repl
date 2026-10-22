@@ -53,3 +53,24 @@ class CliTest {
         assertEquals("targets.uat.environment_marker", json["issues"][0]["path"].textValue())
     }
 }
+
+class CopyCommandTest {
+    private val example = Path.of(System.getProperty("chrepl.exampleConfig"))
+
+    @Test
+    fun `copy refuses a DR source because it would bypass the guard`() {
+        val result =
+            cli().test(
+                listOf("copy", "--config", example.toString(), "--target", "qa1", "--table", "trading.trades", "--cob", "2026-10-19"),
+                envvars = emptyMap(),
+            )
+        assertEquals(ExitCodes.INVALID, result.statusCode, result.output)
+    }
+
+    @Test
+    fun `copy needs a config`() {
+        val result = cli().test(listOf("copy", "--target", "qa1"))
+        assertEquals(1, result.statusCode, result.output)
+        assertContains(result.output, "--config")
+    }
+}

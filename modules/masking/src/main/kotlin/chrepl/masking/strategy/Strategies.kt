@@ -13,7 +13,7 @@ import chrepl.masking.clamp
 import chrepl.masking.contains
 import chrepl.masking.parseLiteral
 import chrepl.masking.toBigIntegerValue
-import chrepl.masking.types.ChType
+import chrepl.types.ChType
 import java.math.BigInteger
 import java.util.Base64
 import java.util.HexFormat

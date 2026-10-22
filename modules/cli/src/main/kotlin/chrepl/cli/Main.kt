@@ -89,6 +89,6 @@ class ValidateConfig : CliktCommand(name = "validate-config") {
     ) = if (n == 1) "1 $word" else "$n ${word}s"
 }
 
-fun cli(): CliktCommand = ClickhouseRepl().subcommands(ValidateConfig())
+fun cli(): CliktCommand = ClickhouseRepl().subcommands(ValidateConfig(), CopyCommand())
 
 fun main(args: Array<String>) = cli().main(args)

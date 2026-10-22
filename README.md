@@ -9,7 +9,7 @@ environments (QA, UAT, perf), with consistent masking of sensitive columns.
 - **Ad-hoc mode**: QA users request a table or dataset for a COB date from a web portal, and the job runs in the background.
 - **Production first**: reads come only from the passive DR datacentre — the active DC is never contacted. A Source Guard admits reads only while DR replication is healthy, pre-empts them when it falls behind, stops immediately if DR becomes active, and fails closed.
 
-Status: M0 (configuration) and M1 (masking engine) implemented; see the plan for what comes next.
+Status: M0 (configuration), M1 (masking engine) and M2 (batch transfer) implemented; see the plan for what comes next.
 
 Docs:
 
@@ -52,5 +52,9 @@ into the config (e.g. `sources.dr.shards[0].host`).
 |------|----------|
 | `modules/config` | Configuration model, YAML loader, semantic validation (SPEC §9). |
 | `modules/masking` | Masking engine: keys, strategies, type-aware table maskers (SPEC §6). `./gradlew :masking:jmh` runs the benchmarks. |
-| `modules/cli` | `clickhouse-repl` command-line tool. |
+| `modules/types` | ClickHouse type model and parser. |
+| `modules/clickhouse` | HTTP client and RowBinary codec. |
+| `modules/transfer` | Schema sync, chunk planning, copy pipeline (SPEC §5). |
+| `modules/cli` | `clickhouse-repl` command-line tool (`validate-config`, `copy`). |
+| `modules/it` | Docker integration tests: `./gradlew :it:test -Pit` (optionally `-Pchrepl.it.image=clickhouse/clickhouse-server:26.8`). |
 | `build-logic` | Shared Gradle conventions (Kotlin, JDK 21 toolchain, ktlint, JUnit). |

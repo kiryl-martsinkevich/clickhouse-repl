@@ -4,7 +4,7 @@ import chrepl.config.model.Domain
 import chrepl.masking.Canonical
 import chrepl.masking.MaskingCollisionException
 import chrepl.masking.strategy.ScalarStrategy
-import chrepl.masking.types.ChType
+import chrepl.types.ChType
 
 /** One masking domain inside a [TableMasker]: normalisation, the strategy, and the per-chunk collision check. */
 internal class DomainMasker(

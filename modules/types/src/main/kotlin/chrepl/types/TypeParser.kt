@@ -1,4 +1,4 @@
-package chrepl.masking.types
+package chrepl.types
 
 /** Parses ClickHouse type strings such as `Map(String, Array(Nullable(Decimal(18, 4))))`. */
 object TypeParser {

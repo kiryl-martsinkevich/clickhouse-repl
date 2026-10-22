@@ -10,7 +10,7 @@ import chrepl.masking.DATE_MAX
 import chrepl.masking.DATE_MIN
 import chrepl.masking.Prf
 import chrepl.masking.toBigIntegerValue
-import chrepl.masking.types.ChType
+import chrepl.types.ChType
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.Duration

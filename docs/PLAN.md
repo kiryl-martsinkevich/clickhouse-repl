@@ -48,7 +48,7 @@ Spring dependency, so they are unit-testable in isolation.
 
 ### 1.1 Integration-test topology
 
-Testcontainers, parameterised over **ClickHouse 25.8 and 26.8** (CI matrix):
+Docker containers driven through the `docker` CLI (`modules/it`, `./gradlew :it:test -Pit`), parameterised over **ClickHouse 25.8 and 26.8** (CI matrix). Each container is published on its own loopback address (127.0.0.x) so configs keep distinct hosts. M2 uses standalone source shards and targets; M3 adds:
 
 - **Keeper** container.
 - **"prod"** and **"DR"** ClickHouse containers holding `ReplicatedMergeTree` replicas of the same tables via that Keeper — 1 shard for most tests, a 3-shard × 2-replica variant (7 containers) for sharding tests in a nightly job.
@@ -117,7 +117,16 @@ Exit criteria
 - Throughput ≥ 50 MB/s uncompressed per core on benchmark tables.
 - Security review of key handling and strategies.
 
-### M2 — Batch transfer via CLI, sharded source (L)
+### M2 — Batch transfer via CLI, sharded source (L) — ✅ done
+
+Delivered: `modules/types` (shared type model), `modules/clickhouse` (HTTP client and RowBinary codec
+for every supported type), `modules/transfer` (schema sync with DDL rewriting, per-shard planner with
+COB→partition mapping and primary-index range splits, chunk copy through a `ReadGate`, staging +
+`REPLACE PARTITION`, marker and key-version checks, `repl_meta` bookkeeping, janitor), `cli copy`
+(dc: test only), `deploy/target-ddl.sql`, and 12 Docker integration tests passing on 25.8 and 26.8.
+Deviations: own HTTP client instead of `client-v2`; `shard_mapping: distributed` deferred (refused
+for now); the "prod" container and its `query_log` assertion start with the M3 topology.
+
 
 Scope
 - `clickhouse` module: client-v2 wrapper with streaming `RowBinaryWithNamesAndTypes` read, streaming `RowBinary` insert, bounded pipe with backpressure, per-query settings, deterministic `query_id`, cancellation.
