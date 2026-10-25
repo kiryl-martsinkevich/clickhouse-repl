@@ -1,0 +1,326 @@
+package chrepl.control
+
+import chrepl.clickhouse.Cancellation
+import chrepl.config.model.Guard
+import chrepl.config.validate.SecretReader
+import chrepl.guard.GuardGate
+import chrepl.guard.GuardLevel
+import chrepl.guard.GuardTimeoutException
+import chrepl.guard.OpsFlags
+import chrepl.guard.Reason
+import chrepl.guard.SourceGuard
+import chrepl.masking.MaskingEngine
+import chrepl.masking.keys.KeyProviders
+import chrepl.transfer.ClientFactory
+import chrepl.transfer.CopySession
+import chrepl.transfer.PartitionLocks
+import chrepl.transfer.ReadGate
+import chrepl.transfer.UnguardedGate
+import org.slf4j.LoggerFactory
+import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
+
+/** Operator flags in Postgres, shared by every process (SPEC §4.6, §4.7). */
+class PgOpsFlags(
+    private val db: Db,
+) : OpsFlags {
+    override val paused: Boolean
+        get() = db.tx { long("SELECT count(*) FROM ops_flags WHERE name = 'paused'") > 0 }
+
+    override val failover: Reason?
+        get() =
+            db.tx {
+                one("SELECT value::text FROM ops_flags WHERE name = 'failover'") { Db.json.readValue(it.getString(1), Reason::class.java) }
+            }
+
+    override fun pause(reason: String) = set("paused", mapOf("reason" to reason), "operator")
+
+    override fun resume() = clear("paused", "operator")
+
+    /** Only the first trigger is kept, so the original cause stays visible. */
+    override fun setFailover(reason: Reason) {
+        db.tx {
+            update(
+                "INSERT INTO ops_flags (name, value, set_by) VALUES ('failover', ?::jsonb, ?) ON CONFLICT (name) DO NOTHING",
+                Db.json.writeValueAsString(reason),
+                if (reason.code == "DR_ACTIVE" && reason.host != null) "guard" else "operator",
+            )
+        }
+    }
+
+    override fun clearFailover() = clear("failover", "operator")
+
+    fun set(
+        name: String,
+        value: Any,
+        actor: String,
+    ) {
+        db.tx {
+            update(
+                "INSERT INTO ops_flags (name, value, set_by) VALUES (?, ?::jsonb, ?) " +
+                    "ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value, set_by = EXCLUDED.set_by, set_at = now()",
+                name,
+                Db.json.writeValueAsString(value),
+                actor,
+            )
+            update(
+                "INSERT INTO audit_log (actor, action, details) VALUES (?, ?, ?::jsonb)",
+                actor,
+                "flag.set.$name",
+                Db.json.writeValueAsString(value),
+            )
+        }
+    }
+
+    fun clear(
+        name: String,
+        actor: String,
+    ) {
+        db.tx {
+            update("DELETE FROM ops_flags WHERE name = ?", name)
+            update("INSERT INTO audit_log (actor, action) VALUES (?, ?)", actor, "flag.clear.$name")
+        }
+    }
+}
+
+/**
+ * Cluster-wide read admission (SPEC §4.4): at most `concurrency.global` reads in total and
+ * `concurrency.per_host` per DR host, across every worker process. Tokens are leased so a crashed
+ * worker's tokens expire.
+ */
+class DbReadTokens(
+    private val db: Db,
+    private val guard: () -> Guard,
+    private val holder: String,
+    private val lease: Duration = Duration.ofMinutes(2),
+) {
+    fun acquire(
+        host: String,
+        queryId: String,
+        maxWait: Duration = Duration.ofDays(365),
+        onWait: (String) -> Unit,
+    ) {
+        var reported = false
+        val deadline = System.nanoTime() + maxWait.toNanos()
+        while (true) {
+            val limits = guard().concurrency
+            val granted =
+                db.tx {
+                    exec("SELECT pg_advisory_xact_lock(7319)")
+                    update("DELETE FROM read_tokens WHERE lease_until < now()")
+                    val total = long("SELECT count(*) FROM read_tokens")
+                    val onHost = long("SELECT count(*) FROM read_tokens WHERE host = ?", host)
+                    if (total < limits.global && onHost < limits.perHost) {
+                        update(
+                            "INSERT INTO read_tokens (query_id, host, holder, lease_until) VALUES (?, ?, ?, now() + make_interval(secs => ?))",
+                            queryId,
+                            host,
+                            holder,
+                            lease.seconds.toDouble(),
+                        )
+                        true
+                    } else {
+                        false
+                    }
+                }
+            if (granted) return
+            if (System.nanoTime() >
+                deadline
+            ) {
+                throw GuardTimeoutException(listOf(Reason("NO_READ_SLOT", host, "no read slot within $maxWait")))
+            }
+            if (!reported) {
+                onWait("waiting for a read slot (limits: ${limits.global} total, ${limits.perHost} per DR host)")
+                reported = true
+            }
+            Thread.sleep(500)
+        }
+    }
+
+    fun renew(queryId: String) {
+        db.tx {
+            update(
+                "UPDATE read_tokens SET lease_until = now() + make_interval(secs => ?) WHERE query_id = ?",
+                lease.seconds.toDouble(),
+                queryId,
+            )
+        }
+    }
+
+    fun release(queryId: String) {
+        db.tx { update("DELETE FROM read_tokens WHERE query_id = ?", queryId) }
+    }
+}
+
+/** REPLACE PARTITION serialised per (target host, table, partition) with Postgres advisory locks (SPEC §5.4). */
+class PgPartitionLocks(
+    private val db: Db,
+) : PartitionLocks {
+    override fun <T> withLock(
+        key: String,
+        block: () -> T,
+    ): T =
+        db.dataSource.connection.use { conn ->
+            conn.prepareStatement("SELECT pg_advisory_lock(hashtextextended(?, 0))").use {
+                it.setString(1, key)
+                it.execute()
+            }
+            try {
+                block()
+            } finally {
+                conn.prepareStatement("SELECT pg_advisory_unlock(hashtextextended(?, 0))").use {
+                    it.setString(1, key)
+                    it.execute()
+                }
+            }
+        }
+}
+
+/**
+ * Per-process runtime shared by workers: masking engines and copy sessions per config version and
+ * target, and the read gate (DB tokens → Source Guard → read). Running reads can be cancelled by
+ * query id, which is how job cancellation reaches an in-flight chunk.
+ */
+class Runtime(
+    private val configs: ConfigRegistry,
+    private val db: Db,
+    private val secrets: SecretReader,
+    val guard: SourceGuard?,
+    private val workerId: String,
+    private val guardWait: Duration = Duration.ofDays(1),
+    private val keyRetry: Duration = Duration.ofSeconds(30),
+    /** Runs after admission, just before a read starts (diagnostics and tests). */
+    private val beforeRead: (queryId: String) -> Unit = {},
+) : AutoCloseable {
+    val clients = ClientFactory(secrets)
+    private val engines = ConcurrentHashMap<String, MaskingEngine>()
+    private val running = ConcurrentHashMap<String, Cancellation>()
+    private val tokens = DbReadTokens(db, { configs.current.guard }, workerId)
+    val locks = PgPartitionLocks(db)
+
+    fun engine(version: String): MaskingEngine =
+        engines.computeIfAbsent(version) {
+            val config = configs.get(version)
+            MaskingEngine.create(config.masking, KeyProviders.create(config.masking, secrets), configs.baseDir)
+        }
+
+    @Volatile private var keyFailedAt = 0L
+
+    @Volatile var keyError: String? = null
+        private set
+
+    /**
+     * Whether the masking key of [version] is loaded or can be loaded now. When the key store (e.g.
+     * Fortanix DSM) is unreachable, workers take no work at all (fail closed, PLAN M8); a failed load
+     * is retried at most every [keyRetry].
+     */
+    fun keyReady(version: String): Boolean {
+        if (engines.containsKey(version)) return true
+        if (System.nanoTime() - keyFailedAt < keyRetry.toNanos()) return false
+        return try {
+            engine(version)
+            keyError = null
+            true
+        } catch (e: Exception) {
+            keyFailedAt = System.nanoTime()
+            keyError = Worker.describe(e)
+            log.warn("masking key for config {} unavailable; taking no work: {}", version, keyError)
+            false
+        }
+    }
+
+    fun session(
+        version: String,
+        target: String,
+        onWait: (queryId: String, reason: String) -> Unit,
+    ): CopySession {
+        // The gate is created per call so wait reasons reach the right chunk; sessions are cheap.
+        val config = configs.get(version)
+        val source = config.sources.values.single()
+        return CopySession(config, target, engine(version), gate(source.dc == "test", onWait), clients, locks)
+    }
+
+    /**
+     * A small data read outside the chunk pipeline (continuous-mode watermark and checksum polls),
+     * admitted like any other read. Waits at most [maxWait], then throws [GuardTimeoutException].
+     */
+    fun <T> guardedRead(
+        version: String,
+        host: String,
+        queryId: String,
+        maxWait: Duration,
+        read: (Cancellation) -> T,
+    ): T {
+        val source =
+            configs
+                .get(version)
+                .sources.values
+                .single()
+        return gate(source.dc == "test", { _, _ -> }, maxWait).withPermit(host, queryId, read)
+    }
+
+    private fun gate(
+        unguarded: Boolean,
+        onWait: (String, String) -> Unit,
+        maxWait: Duration = guardWait,
+    ): ReadGate {
+        val inner: ReadGate =
+            if (unguarded) {
+                UnguardedGate
+            } else {
+                GuardGate(
+                    guard ?: error("no Source Guard in this process"),
+                    maxWait,
+                ) { q, reasons -> onWait(q, reasons.joinToString("; ")) }
+            }
+        return object : ReadGate {
+            override fun <T> withPermit(
+                host: String,
+                queryId: String,
+                read: (Cancellation) -> T,
+            ): T {
+                tokens.acquire(host, queryId, maxWait) { onWait(queryId, it) }
+                try {
+                    return inner.withPermit(host, queryId) { cancellation ->
+                        running[queryId] = cancellation
+                        try {
+                            beforeRead(queryId)
+                            read(cancellation)
+                        } finally {
+                            running.remove(queryId)
+                        }
+                    }
+                } finally {
+                    tokens.release(queryId)
+                }
+            }
+        }
+    }
+
+    /** DR metadata queries (planning, estimates) run only while the guard is GREEN or AMBER (SPEC §4.4). */
+    fun metadataAllowed(): Boolean = guard?.status()?.level?.let { it == GuardLevel.GREEN || it == GuardLevel.AMBER } ?: true
+
+    /** Why DR metadata may not be read now, or null when it may. */
+    fun metadataBlockedReason(): String? =
+        if (metadataAllowed()) {
+            null
+        } else {
+            guard?.status()?.let { status -> status.reasons.joinToString("; ").ifEmpty { "source is ${status.level}" } }
+        }
+
+    /** Cancels an in-flight read (job cancellation); returns true when it was running here. */
+    fun cancel(queryId: String): Boolean =
+        running[queryId]?.let {
+            it.cancel()
+            true
+        } ?: false
+
+    fun renewToken(queryId: String) = tokens.renew(queryId)
+
+    override fun close() {
+        engines.values.forEach { it.close() }
+        guard?.close()
+    }
+}
+
+private val log = LoggerFactory.getLogger(Runtime::class.java)

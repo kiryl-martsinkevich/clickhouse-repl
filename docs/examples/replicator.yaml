@@ -1,0 +1,323 @@
+# clickhouse-repl — example configuration (annotated).
+# See docs/SPEC.md §9 for the schema and validation rules.
+# Secrets are always references: ${file:<path>}, ${env:<NAME>}. Fortanix DSM keys: masking.key.fortanix.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Active production DC: the tool must NEVER contact these (SPEC §1.3, §9.3).
+# Any source or target host listed here, or resolving into these CIDRs, is a
+# hard validation error; a runtime DNS re-resolution into them stops all reads.
+# ---------------------------------------------------------------------------
+active_dc:
+  name: dc-prod
+  hosts:
+    - ch-prod-s1.dc-prod.internal
+    - ch-prod-s2.dc-prod.internal
+    - ch-prod-s3.dc-prod.internal
+  cidrs:
+    - 10.10.0.0/16
+
+# ---------------------------------------------------------------------------
+# Source: the passive DR cluster (3 shards x 1 replica, ReplicatedMergeTree
+# replicas of prod). Only ever read.
+# ---------------------------------------------------------------------------
+sources:
+  dr:
+    dc: dr                                   # required; only dc: dr sources are allowed
+    cluster_name: dr
+    clickhouse_version: "25.8"
+    tls: true
+    reader:                                  # L1-limited read-only user (SPEC §4.2)
+      user: repl_reader
+      password: ${file:/var/run/secrets/chrepl/dr-reader-password}
+    guard:                                   # system tables + KILL own-user queries
+      user: repl_guard
+      password: ${file:/var/run/secrets/chrepl/dr-guard-password}
+    shards:                                  # the single DR replica of each shard is both read and watch host
+      - name: s1
+        host: ch-dr-s1.dc-dr.internal:8443
+      - name: s2
+        host: ch-dr-s2.dc-dr.internal:8443
+      - name: s3
+        host: ch-dr-s3.dc-dr.internal:8443
+    fail_closed_scope: cluster               # cluster | shard: one UNKNOWN host stops all reads (default) or just its shard
+    dc_role_check:                           # SPEC §4.6 — any trigger => DR_ACTIVE
+      foreign_activity: true                 # non-repl_* queries or InsertQuery deltas on DR hosts
+      ignored_users: [monitoring]            # legitimate read-only users on DR (open question §13.2-2)
+      # No external role endpoint exists; the operator failover flag (runbook step 1) is the other trigger.
+
+# ---------------------------------------------------------------------------
+# Targets: shared non-production environments.
+# ---------------------------------------------------------------------------
+targets:
+  qa1:
+    hosts: [ch-qa1-s1.nonprod.internal:8443, ch-qa1-s2.nonprod.internal:8443, ch-qa1-s3.nonprod.internal:8443]
+    cluster_name: qa1
+    shards: 3
+    shard_mapping: same_shards               # same_shards | distributed | single (SPEC §5.5)
+    tls: true
+    writer:
+      user: repl_writer
+      password: ${file:/var/run/secrets/chrepl/qa1-writer-password}
+    environment_marker: qa1                  # must equal SELECT value FROM repl_meta.environment
+    zookeeper_path_template: /clickhouse/qa1/tables/{shard}/{database}/{table}
+    recent_copy_warning: 24h                 # warn before replacing a slice someone else copied recently
+    table_overrides:
+      ttl: "cob_date + INTERVAL 90 DAY"      # applied where the table has cob_date; keeps QA small
+      storage_policy: default
+  uat:
+    hosts: [ch-uat-01.nonprod.internal:8443]
+    cluster_name: uat
+    shards: 1
+    shard_mapping: single
+    tls: true
+    writer:
+      user: repl_writer
+      password: ${file:/var/run/secrets/chrepl/uat-writer-password}
+    environment_marker: uat
+    zookeeper_path_template: /clickhouse/uat/tables/{shard}/{database}/{table}
+    recent_copy_warning: 24h
+
+# ---------------------------------------------------------------------------
+# Source Guard (SPEC §4). Thresholds apply per DR host.
+# ---------------------------------------------------------------------------
+guard:
+  poll_interval: 5s
+  stale_after: 15s                           # poll older than this => UNKNOWN => RED
+  stable_window: 60s                         # continuous GREEN samples needed to admit chunks
+  release_ratio: 0.8                         # leave RED only when below 80% of thresholds
+  thresholds:
+    replication:
+      max_replica_delay: 30s                 # system.replicas.absolute_delay
+      max_queue_size: 50
+      max_queue_oldest_age: 120s
+      max_stuck_entries: 0                   # num_tries > 3 or last_exception set
+      max_inflight_fetches: 4
+      block_on_readonly: true                # is_readonly / is_session_expired
+    host:
+      max_cpu_utilisation: 0.50
+      max_io_wait: 0.20
+      max_memory_ratio: 0.60
+    background:
+      max_active_merges: 10
+      max_mutation_bytes: 50GiB
+  concurrency:
+    global: 2                                # concurrent chunk reads across the DR cluster
+    per_host: 1                              # each DR replica is the only copy of its shard in DR
+  preemption:
+    kill_grace: 5s                           # preemption cannot be disabled (validation)
+  circuit_breaker:
+    max_preemptions: 5
+    within: 30m
+    open_for: 1h
+  blackout_windows:
+    - name: dr-drill
+      cron: "0 8 1 */3 *"                    # quarterly DR drill (example)
+      duration: 12h
+      timezone: Europe/London
+    - name: month-end
+      cron: "0 0 L * *"
+      duration: 36h
+      timezone: Europe/London
+
+# ---------------------------------------------------------------------------
+# Masking (SPEC §6).
+# ---------------------------------------------------------------------------
+masking:
+  realm: nonprod                             # all targets in this realm see identical masked values
+  key:
+    provider: static                         # v1
+    ref: ${file:/var/run/secrets/chrepl/masking-key-v1}   # >= 256-bit, hex or base64; never a literal
+    version: 1
+    # Fortanix DSM (BYOK). Same key material + same version => identical masked values. Envelope mode:
+    # `clickhouse-repl dsm-wrap` wraps the current static key under a non-exportable DSM KEK.
+    # provider: fortanix
+    # version: 1
+    # fortanix:
+    #   endpoint: https://dsm.internal
+    #   api_key: ${file:/var/run/secrets/chrepl/dsm-api-key}
+    #   kek: chrepl-nonprod-kek
+    #   wrapped_key: ${file:/var/run/secrets/chrepl/masking-key-v1.wrapped}
+    #   # or, export mode instead of kek + wrapped_key: key_name: chrepl-masking-v1
+  dictionaries:
+    first_names:   { file: dictionaries/first_names_v1.txt }
+    last_names:    { file: dictionaries/last_names_v1.txt }
+    company_names: { file: dictionaries/company_names_v2.txt }
+  domains:
+    customer_id:
+      strategy: fpe_ff1                      # bijective: stays unique (used as a key)
+      alphabet: digits
+      width: 12                              # customer ids are integers below 10^12
+      approved_by: repo-owner                # required for fpe_ff1
+    account_number:
+      strategy: tokenize
+      normalise: [trim]
+      collision_check: true
+    email:
+      strategy: email
+      local_part: tokenize
+      domain: map_to_example                 # keep | map_to_example | tokenize
+      normalise: [trim, lower]
+    phone:
+      strategy: tokenize                     # keeps +, spaces, dashes and length
+    first_name:
+      strategy: dictionary
+      dictionary: first_names
+    last_name:
+      strategy: dictionary
+      dictionary: last_names
+    counterparty_name:
+      strategy: dictionary
+      dictionary: company_names
+    customer_dates:
+      strategy: date_shift
+      max_days: 180                          # same offset for every date of the same customer
+    amount_noise:
+      strategy: numeric_noise
+      relative: 0.05                         # ±5%, rounded to column scale
+    free_text:
+      strategy: "null"
+
+# ---------------------------------------------------------------------------
+# Table specs. Every column needs a policy: `pass` or a mask rule.
+# Columns not listed => validation error (unless non_pii + approved_by).
+# ---------------------------------------------------------------------------
+tables:
+  - source: trading.trades
+    cob_column: trade_date
+    partition_key: toYYYYMM(trade_date)      # declared; compared with DR by validate-config --online (M3)
+    sharding_key: cityHash64(trade_id)
+    mv_mode: base_only
+    chunk: { max_bytes: 2GiB, max_seconds: 120 }
+    columns:
+      trade_id:          pass
+      trade_date:        pass
+      inserted_at:       pass
+      instrument_id:     pass
+      customer_id:       { mask: customer_id }
+      account_number:    { mask: account_number }
+      counterparty_name: { mask: counterparty_name }
+      quantity:          pass
+      price:             pass
+      notional:          { mask: amount_noise, entity_column: customer_id }
+      trader_comment:    { mask: free_text }
+      tags:              pass                # Array(LowCardinality(String))
+      attributes:                            # Map(String, String): mask selected keys' values
+        map_values:
+          client_email: { mask: email }
+          client_phone: { mask: phone }
+        default: pass
+
+  - source: trading.positions
+    cob_column: cob_date
+    partition_key: toYYYYMM(cob_date)
+    sharding_key: cityHash64(instrument_id)
+    mv_mode: base_only
+    columns:
+      cob_date:       pass
+      customer_id:    { mask: customer_id }  # same domain as trades.customer_id => joins still work
+      account_number: { mask: account_number }
+      instrument_id:  pass
+      quantity:       pass
+      market_value:   { mask: amount_noise, entity_column: customer_id }
+
+  - source: crm.customers
+    full_copy: true                          # small dimension table, no COB
+    max_full_copy_bytes: 5GiB
+    columns:
+      customer_id:   { mask: customer_id }
+      first_name:    { mask: first_name }
+      last_name:     { mask: last_name }
+      email:         { mask: email }
+      phone:         { mask: phone }
+      date_of_birth: { mask: customer_dates, entity_column: customer_id }
+      onboarded_at:  { mask: customer_dates, entity_column: customer_id }
+      profile_json:                          # JSON stored in String: mask by path
+        json_paths:
+          $.contact.email: { mask: email }
+          $.contact.phone: { mask: phone }
+          $.notes:         { mask: free_text }
+        default: pass
+      segment:       pass
+
+  - source: refdata.instruments
+    full_copy: true
+    max_full_copy_bytes: 2GiB
+    classification: non_pii
+    approved_by: repo-owner
+    unlisted_columns: pass
+
+# ---------------------------------------------------------------------------
+# Datasets offered in the portal.
+# ---------------------------------------------------------------------------
+datasets:
+  - name: trading-eod
+    description: Trades and positions for a COB date, plus customers and instruments
+    tables: [trading.trades, trading.positions, crm.customers, refdata.instruments]
+  - name: trades-only
+    tables: [trading.trades]
+
+# ---------------------------------------------------------------------------
+# Continuous (near-real-time) jobs (SPEC §8).
+# ---------------------------------------------------------------------------
+continuous:
+  - name: trades-to-qa1
+    table: trading.trades
+    targets: [qa1]
+    mode: append_watermark
+    watermark_column: inserted_at
+    interval: 60s
+    overlap: 10m
+    dedupe: replace_partition                # replace_partition (replacing_merge_tree: not implemented yet)
+    only_recent_partitions: 2                # never backfill old months via continuous mode
+    lag_slo: 5m
+    lag_alert_after: 30m
+
+  - name: positions-to-qa1
+    table: trading.positions
+    targets: [qa1]
+    mode: partition_fingerprint
+    interval: 5m
+    only_recent_partitions: 3
+    sync_drops: true
+    lag_slo: 15m
+
+  - name: refdata-nightly
+    tables: [refdata.instruments, crm.customers]
+    targets: [qa1, uat]
+    mode: scheduled_full_refresh
+    cron: "0 3 * * *"
+    timezone: Europe/London
+
+# ---------------------------------------------------------------------------
+# Scheduling, access control and quotas (SPEC §7.3, §7.4). Groups come from OIDC claims.
+# No approval workflow: requests within quota run automatically.
+# ---------------------------------------------------------------------------
+scheduling:
+  queue_weights: { continuous: 3, adhoc: 1 }
+  max_running_jobs_per_user: 2
+
+access:
+  - group: qa-trading
+    role: requester
+    datasets: [trading-eod, trades-only]
+    targets: [qa1]
+    quota:
+      max_bytes_per_job: 50GiB
+      max_bytes_per_day: 500GiB
+      max_cob_dates_per_job: 10
+      max_concurrent_jobs: 4
+  - group: uat-leads
+    role: requester
+    datasets: [trading-eod]
+    targets: [qa1, uat]
+    quota:
+      max_bytes_per_job: 200GiB
+      max_bytes_per_day: 1TiB
+      max_cob_dates_per_job: 31
+      max_concurrent_jobs: 4
+  - group: data-platform-ops
+    role: operator
+  - group: data-platform
+    role: admin

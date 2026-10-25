@@ -1,0 +1,6 @@
+apiVersion: v2
+name: clickhouse-repl
+description: Masked ClickHouse replication from the passive DR cluster to non-production (control plane, workers, scheduler, portal)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

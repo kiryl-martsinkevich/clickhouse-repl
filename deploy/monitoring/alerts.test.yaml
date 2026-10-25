@@ -1,0 +1,42 @@
+# promtool test rules alerts.test.yaml
+rule_files: [alerts.yaml]
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'chrepl_active_dc_violations_total{code="ACTIVE_DC_CIDR"}'
+        values: '0 0 1 1 1'
+      - series: 'chrepl_guard_cluster_state'
+        values: '0 0 4 4 4'
+      - series: 'chrepl_continuous_alerting{name="trades-to-qa1",table="trading.trades",target="qa1"}'
+        values: '0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ChreplActiveDcViolation
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: A configured host resolved into the active (production) DC
+              description: >-
+                The runtime re-check found a source or target host inside the active-DC deny-list. All
+                replication reads were stopped (failover flag). Fix DNS or the configuration, then clear
+                the flag (docs/runbook.md, "Active-DC violation").
+      - eval_time: 3m
+        alertname: ChreplDrActive
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: DR may be active - replication is stopped
+              description: >-
+                Foreign activity on DR or the operator failover flag. No reads run until an operator
+                clears the flag (docs/runbook.md, "DC failover").
+      - eval_time: 1m
+        alertname: ChreplDrActive
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: ChreplContinuousLag
+        exp_alerts:
+          - exp_labels: { severity: warning, name: trades-to-qa1, table: trading.trades, target: qa1 }
+            exp_annotations:
+              summary: "Continuous job trades-to-qa1 (trading.trades -> qa1) is behind its lag SLO"
+              description: Lag has exceeded lag_slo for longer than lag_alert_after (SPEC §8.4).

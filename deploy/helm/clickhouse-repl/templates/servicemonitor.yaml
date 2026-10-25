@@ -1,0 +1,14 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "chrepl.fullname" . }}
+  labels: {{- include "chrepl.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {{- include "chrepl.selector" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: management
+      path: /actuator/prometheus
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

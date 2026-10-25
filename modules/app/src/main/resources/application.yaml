@@ -1,0 +1,44 @@
+# Control plane defaults. Deployment-specific values come from the environment, e.g.
+#   CHREPL_CONFIG=/etc/chrepl/replicator.yaml  CHREPL_ROLES=api|worker|all
+#   SPRING_DATASOURCE_URL / _USERNAME / _PASSWORD
+#   SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI (and _AUDIENCES)
+spring:
+  application:
+    name: clickhouse-repl
+  main:
+    banner-mode: off
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+  datasource:
+    hikari:
+      maximum-pool-size: 20
+  threads:
+    virtual:
+      enabled: false
+
+server:
+  port: 8080
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+chrepl:
+  roles: all

@@ -1,0 +1,103 @@
+<!--
+  clickhouse-repl users for PASSIVE DR nodes only, as a users.d file managed by config management.
+  Equivalent to the user/profile/quota part of deploy/dr-ddl.sql (SPEC §4.2); the workload/resource
+  DDL still comes from dr-ddl.sql. Never deploy this file to active-DC nodes.
+  Replace the password hashes (echo -n 'secret' | sha256sum) and the worker network.
+-->
+<clickhouse>
+  <profiles>
+    <repl_reader_profile>
+      <readonly>2</readonly>
+      <max_threads>2</max_threads>
+      <max_memory_usage>4000000000</max_memory_usage>
+      <max_execution_time>900</max_execution_time>
+      <max_bytes_to_read>50000000000</max_bytes_to_read>
+      <max_network_bandwidth>50000000</max_network_bandwidth>
+      <max_network_bandwidth_for_user>100000000</max_network_bandwidth_for_user>
+      <max_local_read_bandwidth>50000000</max_local_read_bandwidth>
+      <max_concurrent_queries_for_user>2</max_concurrent_queries_for_user>
+      <use_uncompressed_cache>0</use_uncompressed_cache>
+      <min_bytes_to_use_direct_io>10000000</min_bytes_to_use_direct_io>
+      <enable_filesystem_cache>0</enable_filesystem_cache>
+      <read_from_filesystem_cache_if_exists_otherwise_bypass_cache>1</read_from_filesystem_cache_if_exists_otherwise_bypass_cache>
+      <force_index_by_date>1</force_index_by_date>
+      <workload>replication_reads</workload>
+      <constraints>
+        <max_threads><max>2</max></max_threads>
+        <max_memory_usage><max>4000000000</max></max_memory_usage>
+        <max_execution_time><max>900</max></max_execution_time>
+        <max_bytes_to_read><max>50000000000</max></max_bytes_to_read>
+        <max_network_bandwidth><max>50000000</max></max_network_bandwidth>
+        <max_network_bandwidth_for_user><max>100000000</max></max_network_bandwidth_for_user>
+        <max_local_read_bandwidth><max>50000000</max></max_local_read_bandwidth>
+        <max_concurrent_queries_for_user><max>2</max></max_concurrent_queries_for_user>
+        <min_bytes_to_use_direct_io><max>10000000</max></min_bytes_to_use_direct_io>
+        <use_uncompressed_cache><const/></use_uncompressed_cache>
+        <enable_filesystem_cache><const/></enable_filesystem_cache>
+        <read_from_filesystem_cache_if_exists_otherwise_bypass_cache><const/></read_from_filesystem_cache_if_exists_otherwise_bypass_cache>
+        <workload><const/></workload>
+      </constraints>
+    </repl_reader_profile>
+    <repl_guard_profile>
+      <!-- No readonly: it would forbid KILL QUERY on the reader's queries. -->
+      <max_threads>1</max_threads>
+      <max_execution_time>10</max_execution_time>
+      <max_memory_usage>200000000</max_memory_usage>
+      <constraints>
+        <max_threads><max>1</max></max_threads>
+        <max_execution_time><max>10</max></max_execution_time>
+        <max_memory_usage><max>200000000</max></max_memory_usage>
+      </constraints>
+    </repl_guard_profile>
+  </profiles>
+
+  <quotas>
+    <repl_reader_quota>
+      <interval>
+        <duration>3600</duration>
+        <queries>2000</queries>
+        <read_rows>20000000000</read_rows>
+        <read_bytes>2000000000000</read_bytes>
+        <execution_time>7200</execution_time>
+      </interval>
+    </repl_reader_quota>
+  </quotas>
+
+  <users>
+    <repl_reader>
+      <password_sha256_hex>REPLACE_WITH_SHA256_OF_READER_SECRET</password_sha256_hex>
+      <networks><ip>10.20.0.0/16</ip></networks>
+      <profile>repl_reader_profile</profile>
+      <quota>repl_reader_quota</quota>
+      <grants>
+        <query>GRANT SELECT ON trading.*</query>
+        <query>GRANT SELECT ON crm.*</query>
+        <query>GRANT SELECT ON refdata.*</query>
+        <query>GRANT SELECT ON system.parts</query>
+        <query>GRANT SELECT ON system.tables</query>
+        <query>GRANT SELECT ON system.columns</query>
+        <query>GRANT SELECT ON system.replicas</query>
+      </grants>
+    </repl_reader>
+    <repl_guard>
+      <password_sha256_hex>REPLACE_WITH_SHA256_OF_GUARD_SECRET</password_sha256_hex>
+      <networks><ip>10.20.0.0/16</ip></networks>
+      <profile>repl_guard_profile</profile>
+      <grants>
+        <query>GRANT SELECT ON system.processes</query>
+        <query>GRANT SELECT ON system.metrics</query>
+        <query>GRANT SELECT ON system.events</query>
+        <query>GRANT SELECT ON system.asynchronous_metrics</query>
+        <query>GRANT SELECT ON system.merges</query>
+        <query>GRANT SELECT ON system.mutations</query>
+        <query>GRANT SELECT ON system.parts</query>
+        <query>GRANT SELECT ON system.replication_queue</query>
+        <query>GRANT SELECT ON system.replicas</query>
+        <query>GRANT SELECT ON system.replicated_fetches</query>
+        <query>GRANT SELECT ON system.user_directories</query>
+        <query>GRANT SHOW TABLES ON *.*</query>
+        <query>GRANT KILL QUERY ON *.*</query>
+      </grants>
+    </repl_guard>
+  </users>
+</clickhouse>

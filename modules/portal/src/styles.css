@@ -1,0 +1,381 @@
+/* Colours meet WCAG 2.1 AA contrast on their backgrounds (checked with axe in the E2E tests). */
+:root {
+  --fg: #1b1f24;
+  --muted: #545d68;
+  --bg: #ffffff;
+  --panel: #f5f7fa;
+  --line: #d5dbe3;
+  --brand: #1f4e79;
+  --link: #0b5cad;
+  --ok: #1a6b32;
+  --warn-bg: #fff4ce;
+  --warn-fg: #5c4400;
+  --bad: #a4161a;
+  --bad-bg: #fde8e8;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  line-height: 1.45;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: var(--link);
+}
+
+:focus-visible {
+  outline: 3px solid #f2a900;
+  outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.skip {
+  position: absolute;
+  left: -999px;
+}
+.skip:focus {
+  left: 1rem;
+  top: 0.5rem;
+  background: var(--bg);
+  padding: 0.25rem 0.5rem;
+  z-index: 10;
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 1.25rem;
+  background: var(--brand);
+  color: #fff;
+}
+.topbar a,
+.topbar .link {
+  color: #fff;
+}
+.brand {
+  font-weight: 700;
+}
+.topbar nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.topbar a[aria-current="page"] {
+  font-weight: 700;
+  text-decoration-thickness: 3px;
+}
+.who {
+  margin-left: auto;
+}
+.who .muted {
+  color: #dce6f0;
+}
+
+.container {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1rem 1.25rem 4rem;
+}
+
+h1 {
+  font-size: 1.6rem;
+  margin: 0.75rem 0;
+}
+h1:focus {
+  outline: none;
+}
+h2 {
+  font-size: 1.2rem;
+}
+
+.muted,
+.hint {
+  color: var(--muted);
+}
+.hint {
+  font-size: 0.9rem;
+  margin: 0.25rem 0 0;
+}
+
+.banner {
+  padding: 0.6rem 1.25rem;
+  font-weight: 600;
+}
+.banner-warn {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+.banner-danger {
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem 1rem;
+}
+legend {
+  font-weight: 600;
+  padding: 0 0.25rem;
+}
+.field {
+  margin: 0.5rem 0;
+}
+.field > label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.2rem;
+}
+.inline {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.inline > label {
+  display: inline;
+  margin: 0;
+}
+.radios {
+  display: flex;
+  gap: 1.5rem;
+}
+.filters {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+input,
+select,
+button {
+  font: inherit;
+}
+input[type="text"],
+input[type="date"],
+select {
+  padding: 0.3rem 0.4rem;
+  border: 1px solid #8a94a0;
+  border-radius: 4px;
+  background: #fff;
+  color: var(--fg);
+}
+select[multiple] {
+  min-width: 18rem;
+}
+button {
+  padding: 0.35rem 0.85rem;
+  border: 1px solid #6b7682;
+  border-radius: 4px;
+  background: #fff;
+  color: var(--fg);
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+  color: #5f6b78;
+  background: #eef1f4;
+}
+button.primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+button.primary:disabled {
+  background: #5f7f9f;
+  border-color: #5f7f9f;
+  color: #fff;
+}
+button.danger {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+button.link {
+  border: none;
+  background: none;
+  text-decoration: underline;
+  padding: 0 0.25rem;
+}
+.actions {
+  display: flex;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 0.75rem 1rem;
+  margin: 1rem 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5rem 0 1rem;
+}
+caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 0.25rem 0;
+}
+th,
+td {
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  padding: 0.4rem 0.5rem;
+  vertical-align: top;
+}
+th {
+  background: var(--panel);
+}
+.row-alert td {
+  background: var(--bad-bg);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1rem;
+  margin: 0 0 0.75rem;
+}
+.facts dt {
+  font-weight: 600;
+}
+.facts dd {
+  margin: 0;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: #e3e8ee;
+  color: var(--fg);
+}
+.badge-succeeded,
+.badge-level-green {
+  background: #d6f0dc;
+  color: var(--ok);
+}
+.badge-failed,
+.badge-blocked,
+.badge-level-red,
+.badge-level-dr_active {
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+.badge-waiting_for_source,
+.badge-level-amber,
+.badge-level-unknown {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+.badge-running,
+.badge-planning,
+.badge-finalising {
+  background: #dbe9f8;
+  color: #0b4a8b;
+}
+
+.progress-wrap {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+progress {
+  width: 8rem;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  list-style: none;
+  padding: 0;
+}
+.chips li {
+  background: #e3e8ee;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+}
+.recent li {
+  margin: 0.25rem 0;
+}
+.confirm {
+  display: block;
+  margin-top: 0.5rem;
+  font-weight: 600;
+}
+.plain {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.error {
+  color: var(--bad);
+  font-weight: 600;
+}
+.warn {
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  padding: 0.3rem 0.5rem;
+}
+.ok {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.toasts {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 26rem;
+}
+.toast {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  background: #fff;
+  border: 2px solid var(--line);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+.toast-ok {
+  border-color: var(--ok);
+}
+.toast-bad {
+  border-color: var(--bad);
+}
+.toggle {
+  display: block;
+  margin-bottom: 0.5rem;
+}
