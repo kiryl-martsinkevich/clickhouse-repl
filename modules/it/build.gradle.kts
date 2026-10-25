@@ -8,6 +8,7 @@ dependencies {
     testImplementation(project(":control"))
     testImplementation(project(":app"))
     testImplementation(project(":cli"))
+    testImplementation(project(":devidp"))
     testImplementation(libs.spring.boot)
     testImplementation(libs.clikt)
     testImplementation(platform(libs.spring.boot.bom))
@@ -23,6 +24,11 @@ tasks.test {
     enabled = project.hasProperty("it")
     systemProperty("chrepl.exampleConfig", rootProject.file("docs/examples/replicator.yaml").absolutePath)
     systemProperty("chrepl.drDdl", rootProject.file("deploy/dr-ddl.sql").absolutePath)
+    systemProperty("chrepl.demoDir", rootProject.file("deploy/demo").absolutePath)
+    systemProperty("chrepl.portalDir", rootProject.file("modules/portal").absolutePath)
+    // The portal E2E test also needs Node.js and Chromium: -Pe2e.
+    if (project.hasProperty("e2e")) systemProperty("chrepl.e2e", "true")
+    (project.findProperty("screenshots") as String?)?.let { systemProperty("chrepl.screenshots", rootProject.file(it).absolutePath) }
     (project.findProperty("chrepl.it.image") as String?)?.let { systemProperty("chrepl.it.image", it) }
     maxParallelForks = 1
     testLogging { events("passed", "skipped", "failed") }

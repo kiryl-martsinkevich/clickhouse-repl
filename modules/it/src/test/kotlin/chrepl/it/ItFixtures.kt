@@ -113,6 +113,40 @@ object ItFixtures {
         }
     }
 
+    /**
+     * Points every `${env:…}` / `${file:…}` reference in [node] at a file in [dir] holding
+     * [secret] of the reference, the way the app reads secrets in production.
+     */
+    fun secretsToFiles(
+        node: com.fasterxml.jackson.databind.JsonNode,
+        dir: java.nio.file.Path,
+        secret: (ref: String) -> String,
+    ) {
+        val refs = Regex("""^\$\{(env|file):([^}]+)}$""")
+
+        fun replacement(value: com.fasterxml.jackson.databind.JsonNode): com.fasterxml.jackson.databind.node.TextNode? {
+            val match = (value as? com.fasterxml.jackson.databind.node.TextNode)?.textValue()?.let { refs.matchEntire(it) } ?: return null
+            val ref = match.groupValues[2]
+            val file = dir.resolve(ref.substringAfterLast('/').replace(Regex("[^A-Za-z0-9_.-]"), "_"))
+            java.nio.file.Files
+                .writeString(file, secret(ref))
+            return com.fasterxml.jackson.databind.node
+                .TextNode("\${file:${file.toAbsolutePath()}}")
+        }
+        when (node) {
+            is ObjectNode ->
+                for ((key, value) in node.properties().toList()) {
+                    replacement(value)?.let { node.set<com.fasterxml.jackson.databind.JsonNode>(key, it) }
+                        ?: secretsToFiles(value, dir, secret)
+                }
+            is com.fasterxml.jackson.databind.node.ArrayNode ->
+                for (i in 0 until node.size()) {
+                    replacement(node[i])?.let { node.set(i, it) } ?: secretsToFiles(node[i], dir, secret)
+                }
+            else -> Unit
+        }
+    }
+
     /** The writer's least privileges on a target, as in deploy/target-ddl.sql. */
     private val TARGET_GRANTS =
         listOf(

@@ -3,7 +3,14 @@ plugins {
     alias(libs.plugins.spring.boot)
 }
 
+val portal by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+
 dependencies {
+    // -PskipPortal builds the app without the SPA (no Node.js needed).
+    if (!project.hasProperty("skipPortal")) portal(project(path = ":portal", configuration = "dist"))
     implementation(project(":control"))
     implementation(platform(libs.spring.boot.bom))
     implementation(libs.spring.boot.starter.webmvc)
@@ -20,6 +27,10 @@ dependencies {
     testImplementation(libs.junit.jupiter)
     testImplementation(kotlin("test"))
     testRuntimeOnly(libs.junit.platform.launcher)
+}
+
+tasks.processResources {
+    from(portal) { into("static") }
 }
 
 tasks.bootJar {

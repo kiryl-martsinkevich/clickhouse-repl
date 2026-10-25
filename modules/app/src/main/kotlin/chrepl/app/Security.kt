@@ -20,15 +20,24 @@ import org.springframework.stereotype.Component
  * its token in memory (authorization code + PKCE, PLAN M6).
  */
 @Configuration(proxyBeanMethods = false)
-class Security {
+class Security(
+    private val props: AppProperties,
+) {
     @Bean
     fun filterChain(http: HttpSecurity): SecurityFilterChain =
         http
             .authorizeHttpRequests {
                 it
                     .requestMatchers(
+                        // The portal's static files and its public OIDC client settings.
+                        "/",
+                        "/index.html",
+                        "/assets/**",
+                        "/favicon.svg",
+                        "/portal/config.json",
                         "/actuator/health",
                         "/actuator/health/**",
+                        "/actuator/prometheus",
                         "/v3/api-docs",
                         "/v3/api-docs/**",
                         "/swagger-ui/**",
@@ -39,7 +48,21 @@ class Security {
             }.oauth2ResourceServer { it.jwt(Customizer.withDefaults()) }
             .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
             .csrf { it.disable() }
-            .build()
+            .headers { h ->
+                // The SPA loads only its own scripts and talks only to the API and the OIDC issuer.
+                val issuer = props.portal.issuer.trimEnd('/')
+                h.contentSecurityPolicy { csp ->
+                    csp.policyDirectives(
+                        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+                            "connect-src 'self' $issuer; form-action 'self' $issuer; frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
+                    )
+                }
+                h.referrerPolicy {
+                    it.policy(
+                        org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER,
+                    )
+                }
+            }.build()
 }
 
 /** Maps a validated JWT to the control plane's [Principal]. */

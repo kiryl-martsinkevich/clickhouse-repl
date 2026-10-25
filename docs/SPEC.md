@@ -663,6 +663,22 @@ Implementation notes (M4):
 - The active config version lives in Postgres, so a reload through any API replica applies to every process within 5 s. Source and guard settings are read at startup, so changing them needs a restart.
 - `/api/v1/continuous*` arrive with M5.
 
+### 7.5.1 Portal implementation notes (M6)
+
+- **Build and serving.** React 19 + TypeScript SPA built with Vite (`modules/portal`) and served by the app at `/`. Hash routes: `#/new`, `#/jobs`, `#/jobs/{id}`, `#/history`, `#/continuous`, `#/guard`, `#/admin`.
+- **Sign-in.** OIDC authorization code + PKCE (S256) as a public client. The settings come from `GET /portal/config.json` (`chrepl.portal.issuer`, `client-id`, `scope`).
+  - The access token stays in memory only; a reload signs in again through the IdP's session.
+  - The API accepts only bearer tokens, so CSRF does not apply.
+  - The app sends a strict CSP: own scripts and styles only; `connect-src` and `form-action` limited to the API and the issuer; no framing.
+- **Live updates.** Polling every 2–5 s (no SSE). Notifications appear in the portal when one of the user's jobs ends. The webhook (Q7) is not built.
+- **Wait state.** A job held by the guard shows `WAITING_FOR_SOURCE` with the guard's reason. This applies both before planning (PENDING) and while chunks wait (RUNNING).
+- **Freshness and ETA.**
+  - Data freshness is DR's current replica delay behind production.
+  - The ETA is extrapolated from the chunk rate so far.
+- **Estimates** report `confirmation_required`, computed exactly as submission does: other users' copies within the target's `recent_copy_warning`. The portal blocks submission until the user ticks the confirmation.
+- **Catalog.** Admins see every dataset, table and target (to inspect any target's history). Submitting still needs a requester rule.
+- **Dev IdP.** `modules/devidp` is a development-only OIDC provider (sign-in page with fixed users, `/dev/token` for the CLI) for the E2E tests and the demo. It must never be deployed.
+
 ### 7.6 Later: restricted custom filters
 
 Power users may later supply an extra filter (`WHERE region = 'EU'`) in addition to the COB,

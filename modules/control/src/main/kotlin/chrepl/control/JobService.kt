@@ -70,7 +70,27 @@ class JobService(
             sourceReason = if (blocked) status.reasons.joinToString("; ") else null,
             queuedJobs = db.tx { long("SELECT count(*) FROM jobs WHERE state IN ('PENDING', 'PLANNING', 'RUNNING') AND queue = 'adhoc'") },
             recentCopies = recentCopies(request.target, tables, request.cobDates, Duration.ofDays(7)),
+            confirmationRequired = needingConfirmation(principal, request.target, tables, request.cobDates).isNotEmpty(),
         )
+    }
+
+    /**
+     * Slices on a shared target that someone else copied within the target's `recent_copy_warning`
+     * (SPEC §7.1 step 4). Continuous syncs overwrite their slices anyway, so the scheduler's copies
+     * never need a confirmation.
+     */
+    private fun needingConfirmation(
+        principal: Principal,
+        target: String,
+        tables: List<String>,
+        cobDates: List<LocalDate>,
+    ): List<RecentCopy> {
+        val window =
+            configs.current.targets
+                .getValue(target)
+                .recentCopyWarning
+                ?.value ?: return emptyList()
+        return recentCopies(target, tables, cobDates, window).filter { it.requester != principal.user && it.requester != SCHEDULER }
     }
 
     private fun estimateTable(
@@ -113,12 +133,7 @@ class JobService(
                 .recentCopyWarning
                 ?.value
         if (window != null && !request.confirmOverwriteRecent) {
-            // Continuous syncs overwrite their slices anyway, so only other people's copies need a confirmation.
-            val recent =
-                recentCopies(request.target, tables, request.cobDates, window).filter {
-                    it.requester != principal.user &&
-                        it.requester != SCHEDULER
-                }
+            val recent = needingConfirmation(principal, request.target, tables, request.cobDates)
             if (recent.isNotEmpty()) {
                 throw ConflictException(
                     "recently copied by others: " +

@@ -70,7 +70,10 @@ data class Estimate(
     val sourceAvailable: Boolean,
     val sourceReason: String?,
     val queuedJobs: Long,
+    /** Copies of this slice on the target in the last 7 days, by anyone. */
     val recentCopies: List<RecentCopy>,
+    /** Submitting needs `confirm_overwrite_recent`: someone else copied the slice within the target's warning window. */
+    val confirmationRequired: Boolean = false,
 )
 
 data class Progress(

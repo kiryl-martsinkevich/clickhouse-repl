@@ -38,6 +38,14 @@ class AccessPolicy(
     /** Datasets, tables and targets visible to [principal] in the catalog. */
     fun catalog(principal: Principal): Catalog {
         val rules = rules(principal)
+        // Admins see everything (to inspect any target's history); submitting still needs a requester rule.
+        if (rules.any { it.role == Role.ADMIN }) {
+            return Catalog(
+                datasets = config.datasets.map { CatalogDataset(it.name, it.description, it.tables) },
+                tables = config.tables.map { CatalogTable(it.source, it.cobColumn, it.fullCopy) },
+                targets = config.targets.keys.toList(),
+            )
+        }
         val datasets = rules.flatMap { it.datasets }.toSet()
         val tables = rules.flatMap { it.tables }.toSet() + datasets.flatMap { datasetTables(it) }
         return Catalog(

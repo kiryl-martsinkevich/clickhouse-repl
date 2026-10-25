@@ -15,6 +15,7 @@ data class AppProperties(
     val roles: Set<ProcessRole> = setOf(ProcessRole.ALL),
     val worker: WorkerProperties = WorkerProperties(),
     val auth: AuthProperties = AuthProperties(),
+    val portal: PortalProperties = PortalProperties(),
     /** How long a chunk may wait for the Source Guard before it is re-queued. */
     val guardWait: Duration = Duration.ofHours(1),
     /** Online config checks at load time (SPEC §9.3); all on in production. */
@@ -33,6 +34,14 @@ data class WorkerProperties(
 data class AuthProperties(
     val userClaim: String = "preferred_username",
     val groupsClaim: String = "groups",
+)
+
+/** The portal's OIDC client (authorization code + PKCE in the browser, SPEC §7.1). */
+data class PortalProperties(
+    /** The issuer the browser signs in with; empty disables the portal. */
+    val issuer: String = "",
+    val clientId: String = "chrepl-portal",
+    val scope: String = "openid profile",
 )
 
 data class ValidationProperties(

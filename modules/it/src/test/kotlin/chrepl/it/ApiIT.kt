@@ -6,9 +6,6 @@ import chrepl.cli.cli
 import chrepl.config.load.ConfigLoader
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.databind.node.ArrayNode
-import com.fasterxml.jackson.databind.node.ObjectNode
-import com.fasterxml.jackson.databind.node.TextNode
 import com.github.ajalt.clikt.testing.test
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
@@ -66,7 +63,7 @@ class ApiIT {
         // Secrets as files, the way the app reads them in production.
         val secrets = dir.resolve("secrets").createDirectories()
         val tree = ItFixtures.configTree()
-        rewriteSecrets(tree, secrets)
+        ItFixtures.secretsToFiles(tree, secrets) { ref -> if ("MASK" in ref.uppercase()) ItFixtures.maskingKey else "it-password" }
         val config = dir.resolve("replicator.yaml")
         config.writeText(ConfigLoader.mapper.writeValueAsString(tree))
 
@@ -113,32 +110,6 @@ class ApiIT {
     }
 
     // ------------------------------------------------------------------------------------- helpers
-
-    /** Points every `${env:…}` / `${file:…}` reference at a file in [dir]: the masking key, or a password (the test users accept any). */
-    private fun rewriteSecrets(
-        node: JsonNode,
-        dir: Path,
-    ) {
-        val refs = Regex("""^\$\{(env|file):([^}]+)}$""")
-
-        fun replacement(value: JsonNode): TextNode? {
-            val match = (value as? TextNode)?.textValue()?.let { refs.matchEntire(it) } ?: return null
-            val file = dir.resolve(match.groupValues[2].substringAfterLast('/').replace(Regex("[^A-Za-z0-9_.-]"), "_"))
-            Files.writeString(file, if ("MASK" in match.groupValues[2].uppercase()) ItFixtures.maskingKey else "it-password")
-            return TextNode("\${file:${file.toAbsolutePath()}}")
-        }
-        when (node) {
-            is ObjectNode ->
-                for ((key, value) in node.properties().toList()) {
-                    replacement(value)?.let { node.set<JsonNode>(key, it) } ?: rewriteSecrets(value, dir)
-                }
-            is ArrayNode ->
-                for (i in 0 until node.size()) {
-                    replacement(node[i])?.let { node.set(i, it) } ?: rewriteSecrets(node[i], dir)
-                }
-            else -> Unit
-        }
-    }
 
     private fun b64(bytes: ByteArray) = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
 

@@ -9,7 +9,7 @@ environments (QA, UAT, perf), with consistent masking of sensitive columns.
 - **Ad-hoc mode**: QA users request a table or dataset for a COB date from a web portal, and the job runs in the background.
 - **Production first**: reads come only from the passive DR datacentre — the active DC is never contacted. A Source Guard admits reads only while DR replication is healthy, pre-empts them when it falls behind, stops immediately if DR becomes active, and fails closed.
 
-Status: M0 (configuration), M1 (masking engine), M2 (batch transfer), M3 (Source Guard) and M4 (control plane: jobs, workers, REST API, CLI client) and M5 (continuous mode) implemented; see the plan for what comes next.
+Status: M0 (configuration), M1 (masking engine), M2 (batch transfer), M3 (Source Guard) and M4 (control plane: jobs, workers, REST API, CLI client) M5 (continuous mode) and M6 (portal) implemented; see the plan for what comes next.
 
 Docs:
 
@@ -48,6 +48,20 @@ java -jar modules/app/build/libs/clickhouse-repl-app.jar
 | `chrepl.worker.threads`, `lease` | Chunk concurrency per worker process and the chunk lease (default 4, 60 s). Cluster-wide read limits come from `guard.concurrency`. |
 
 OpenAPI: `/v3/api-docs` (Swagger UI at `/swagger-ui.html`); health: `/actuator/health`.
+
+## Portal
+
+QA users request copies in the browser: dataset or tables → COB dates → shared target → estimate
+(with who last replaced the slice) → submit. They then follow the job while it waits for the DR
+cluster and runs.
+
+| Waiting for the DR cluster | Replacing someone else's recent copy |
+|---|---|
+| ![Job waiting for the source](docs/images/portal-waiting.png) | ![Estimate with confirmation](docs/images/portal-confirmation.png) |
+
+Settings: `chrepl.portal.issuer` (the OIDC issuer the browser signs in with), `chrepl.portal.client-id`
+(a public client; default `chrepl-portal`), `chrepl.portal.scope`. The browser E2E tests run with
+`./gradlew :it:test -Pit -Pe2e --tests '*PortalE2EIT*'` (needs Node.js 22 and Chromium).
 
 ## Request copies from the command line
 
@@ -95,7 +109,9 @@ into the config (e.g. `sources.dr.shards[0].host`).
 | `modules/transfer` | Schema sync, chunk planning, copy pipeline (SPEC §5). |
 | `modules/guard` | Source Guard: DR signals, admission, pre-emption, DR_ACTIVE (SPEC §4). |
 | `modules/control` | Control plane core: Postgres schema, job service, RBAC/quotas, workers, registry, audit (SPEC §7). |
-| `modules/app` | Spring Boot application: REST API, OIDC resource server, process roles. |
+| `modules/app` | Spring Boot application: REST API, OIDC resource server, process roles; serves the portal. |
+| `modules/portal` | Portal SPA (React + TypeScript, Vite) and its Playwright E2E specs. |
+| `modules/devidp` | Development-only OIDC provider for E2E tests and the demo. Never deploy it. |
 | `modules/cli` | `clickhouse-repl` command-line tool (`validate-config`, `copy`, and API commands `submit`, `dry-run`, `status`, `jobs`, `cancel`). |
 | `modules/it` | Docker integration tests: `./gradlew :it:test -Pit` (optionally `-Pchrepl.it.image=clickhouse/clickhouse-server:26.8`). |
 | `build-logic` | Shared Gradle conventions (Kotlin, JDK 21 toolchain, ktlint, JUnit). |

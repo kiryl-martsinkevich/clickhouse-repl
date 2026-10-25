@@ -279,7 +279,24 @@ Exit criteria
 - IT: a partition dropped on "prod" → dropped on the target when `sync_drops`.
 - IT: guard RED for 10 minutes → lag grows, then catches up after GREEN; no reads during RED.
 
-### M6 — Portal (M)
+### M6 — Portal (M) — ✅ done
+
+Delivered:
+- `modules/portal`: a React + TS SPA served by the app. It has all the pages listed below: new request with estimate, last-copied info and the recent-overwrite confirmation; jobs and job detail with wait reason, per-shard progress, freshness and ETA; target history; continuous status with pause/resume; guard status plus a banner; operations (pause, failover flag, config reload).
+  - OIDC code + PKCE, a strict CSP, and in-portal completion notifications.
+- `modules/devidp`: a dev-only OIDC provider.
+- `PortalE2EIT`: Playwright against prod → DR → qa1, Postgres, the dev IdP and the app. Three browser flows; axe (WCAG 2.1 AA) on every page; masked data verified on qa1; no contact with prod.
+- Screenshots in `docs/images/`.
+
+Found while testing (fixed):
+1. The estimate's 7-day "last copied" list and the submit-time confirmation rule could disagree. The estimate now returns `confirmation_required` from the same rule.
+2. The dev IdP rejected CORS from the portal's origin.
+3. axe flagged ARIA roles on `<dl>`/`<dd>`.
+
+Not done in M6 (moved):
+- SSE (polling is used).
+- The completion webhook (Q7 open).
+
 
 Scope
 - React + TS SPA served by the app; OIDC login (authorization code + PKCE).

@@ -14,6 +14,8 @@ data class GuardView(
     val failover: Reason?,
     /** False when this process runs without a Source Guard (unguarded `dc: test` sources). */
     val guarded: Boolean,
+    /** How far DR trails the active DC: the freshness of anything read now. */
+    val replicaDelaySeconds: Long? = null,
 )
 
 /**
@@ -45,6 +47,7 @@ class OpsService(
             paused = flags.paused,
             failover = flags.failover,
             guarded = status != null,
+            replicaDelaySeconds = status?.replicaDelaySeconds,
         )
     }
 
