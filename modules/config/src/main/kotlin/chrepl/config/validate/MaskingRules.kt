@@ -52,18 +52,17 @@ internal fun RuleContext.checkMasking() {
 
 private fun RuleContext.checkKey() {
     val key = config.masking.key
-    when (key.provider) {
-        "static" -> {}
-
-        "fortanix" -> {
-            error(Code.KEY_PROVIDER, "masking.key.provider", "the Fortanix DSM provider is planned for M8; use 'static' for now")
-        }
-
-        else -> {
-            error(Code.KEY_PROVIDER, "masking.key.provider", "unknown key provider '${key.provider}' (supported: static)")
-        }
-    }
     if (key.version < 1) error(Code.KEY_VERSION, "masking.key.version", "key version must be at least 1")
+    when (key.provider) {
+        "static" -> checkStaticKey()
+        "fortanix" -> checkFortanixKey()
+        else -> error(Code.KEY_PROVIDER, "masking.key.provider", "unknown key provider '${key.provider}' (supported: static, fortanix)")
+    }
+}
+
+private fun RuleContext.checkStaticKey() {
+    val key = config.masking.key
+    if (key.fortanix != null) error(Code.KEY_PROVIDER, "masking.key.fortanix", "fortanix settings need provider: fortanix")
     val ref = key.ref
     if (ref == null) {
         error(Code.KEY_REF, "masking.key.ref", "the static provider needs ref: \${file:/path} or \${env:NAME}")
@@ -80,6 +79,38 @@ private fun RuleContext.checkKey() {
             "key ${keyName(ref)} has ${bytes.size * 8} bits; at least ${KeyEncoding.MIN_BYTES * 8} are required",
         )
     }
+}
+
+private fun RuleContext.checkFortanixKey() {
+    val key = config.masking.key
+    val path = "masking.key.fortanix"
+    if (key.ref != null) error(Code.KEY_REF, "masking.key.ref", "the fortanix provider takes its key from DSM; remove ref")
+    val dsm =
+        key.fortanix
+            ?: return error(
+                Code.KEY_PROVIDER,
+                path,
+                "provider fortanix needs a fortanix block (endpoint, api_key, and kek + wrapped_key or key_name)",
+            )
+    val uri = runCatching { java.net.URI.create(dsm.endpoint) }.getOrNull()
+    val local = uri?.host == "localhost" || uri?.host == "127.0.0.1"
+    if (uri?.scheme != "https" && !(uri?.scheme == "http" && local)) {
+        error(Code.INVALID_VALUE, "$path.endpoint", "the DSM endpoint must be an https:// URL")
+    }
+    checkSecret(dsm.apiKey, "$path.api_key")
+    val envelope = dsm.kek != null || dsm.wrappedKey != null
+    val export = dsm.keyName != null
+    when {
+        envelope && export -> error(Code.KEY_PROVIDER, path, "use either kek + wrapped_key (envelope) or key_name (export), not both")
+        !envelope && !export -> error(Code.KEY_PROVIDER, path, "set kek + wrapped_key (envelope, recommended) or key_name (export)")
+        envelope && (dsm.kek == null || dsm.wrappedKey == null) ->
+            error(
+                Code.KEY_PROVIDER,
+                path,
+                "envelope mode needs both kek and wrapped_key",
+            )
+    }
+    dsm.wrappedKey?.let { checkSecret(it, "$path.wrapped_key") }
 }
 
 private fun keyName(ref: SecretRef) = ref.toString()

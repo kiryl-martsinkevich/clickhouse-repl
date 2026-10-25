@@ -117,8 +117,26 @@ class NegativeConfigTest {
                     obj("/targets/qa1").put("shards", 2)
                 },
                 // --- masking
-                Case("Fortanix provider before M8", Code.KEY_PROVIDER, "masking.key.provider") {
-                    obj("/masking/key").put("provider", "fortanix")
+                Case("Fortanix provider without its settings", Code.KEY_PROVIDER, "masking.key.fortanix") {
+                    obj("/masking/key").put("provider", "fortanix").remove("ref")
+                },
+                Case("Fortanix with both envelope and export settings", Code.KEY_PROVIDER, "masking.key.fortanix") {
+                    obj("/masking/key").put("provider", "fortanix").remove("ref")
+                    obj("/masking/key")
+                        .putObject("fortanix")
+                        .put("endpoint", "https://dsm.internal")
+                        .put("api_key", "\${file:/run/dsm-api-key}")
+                        .put("kek", "kek-1")
+                        .put("wrapped_key", "\${file:/run/wrapped}")
+                        .put("key_name", "hmac-1")
+                },
+                Case("Fortanix over plain http", Code.INVALID_VALUE, "masking.key.fortanix.endpoint") {
+                    obj("/masking/key").put("provider", "fortanix").remove("ref")
+                    obj("/masking/key")
+                        .putObject("fortanix")
+                        .put("endpoint", "http://dsm.internal")
+                        .put("api_key", "\${file:/run/dsm-api-key}")
+                        .put("key_name", "hmac-1")
                 },
                 Case("fpe_ff1 without approval", Code.STRATEGY_OPTION_MISSING, "masking.domains.customer_id.approved_by") {
                     obj("/masking/domains/customer_id").remove("approved_by")

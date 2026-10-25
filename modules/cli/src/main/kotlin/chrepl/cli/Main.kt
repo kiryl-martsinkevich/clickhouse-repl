@@ -99,6 +99,7 @@ fun cli(): CliktCommand =
         JobsCommand(),
         CancelCommand(),
         RekeyCommand(),
+        DsmWrapCommand(),
     )
 
 fun main(args: Array<String>) = cli().main(args)

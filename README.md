@@ -9,7 +9,7 @@ environments (QA, UAT, perf), with consistent masking of sensitive columns.
 - **Ad-hoc mode**: QA users request a table or dataset for a COB date from a web portal, and the job runs in the background.
 - **Production first**: reads come only from the passive DR datacentre — the active DC is never contacted. A Source Guard admits reads only while DR replication is healthy, pre-empts them when it falls behind, stops immediately if DR becomes active, and fails closed.
 
-Status: M0 (configuration), M1 (masking engine), M2 (batch transfer), M3 (Source Guard) and M4 (control plane: jobs, workers, REST API, CLI client) M5 (continuous mode), M6 (portal) and M7 (hardening: views, retention, rekey, metrics, Helm) implemented; see the plan for what comes next.
+Status: M0 (configuration), M1 (masking engine), M2 (batch transfer), M3 (Source Guard) and M4 (control plane: jobs, workers, REST API, CLI client) M5 (continuous mode), M6 (portal) and M7 (hardening: views, retention, rekey, metrics, Helm) and M8 (Fortanix DSM key provider) implemented: the whole plan; see the plan for what comes next.
 
 Docs:
 

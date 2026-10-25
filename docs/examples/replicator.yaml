@@ -1,6 +1,6 @@
 # clickhouse-repl — example configuration (annotated).
 # See docs/SPEC.md §9 for the schema and validation rules.
-# Secrets are always references: ${file:<path>}, ${env:<NAME>} (later: ${fortanix:<key-id>}).
+# Secrets are always references: ${file:<path>}, ${env:<NAME>}. Fortanix DSM keys: masking.key.fortanix.
 
 version: 1
 
@@ -130,13 +130,16 @@ masking:
     provider: static                         # v1
     ref: ${file:/var/run/secrets/chrepl/masking-key-v1}   # >= 256-bit, hex or base64; never a literal
     version: 1
-    # Later (Fortanix DSM, BYOK; same key material + same version => identical masked values):
+    # Fortanix DSM (BYOK). Same key material + same version => identical masked values. Envelope mode:
+    # `clickhouse-repl dsm-wrap` wraps the current static key under a non-exportable DSM KEK.
     # provider: fortanix
-    # endpoint: https://dsm.internal
-    # kek_id: chrepl-nonprod-kek
-    # wrapped_key: ${file:/var/run/secrets/chrepl/masking-key-v1.wrapped}
-    # auth: { api_key: ${file:/var/run/secrets/chrepl/dsm-api-key} }
     # version: 1
+    # fortanix:
+    #   endpoint: https://dsm.internal
+    #   api_key: ${file:/var/run/secrets/chrepl/dsm-api-key}
+    #   kek: chrepl-nonprod-kek
+    #   wrapped_key: ${file:/var/run/secrets/chrepl/masking-key-v1.wrapped}
+    #   # or, export mode instead of kek + wrapped_key: key_name: chrepl-masking-v1
   dictionaries:
     first_names:   { file: dictionaries/first_names_v1.txt }
     last_names:    { file: dictionaries/last_names_v1.txt }

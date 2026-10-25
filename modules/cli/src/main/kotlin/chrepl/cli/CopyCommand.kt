@@ -6,7 +6,7 @@ import chrepl.config.validate.ValidationOptions
 import chrepl.guard.GuardFactory
 import chrepl.guard.GuardGate
 import chrepl.masking.MaskingEngine
-import chrepl.masking.keys.StaticKeyProvider
+import chrepl.masking.keys.KeyProviders
 import chrepl.transfer.Chunk
 import chrepl.transfer.ClientFactory
 import chrepl.transfer.CopyJob
@@ -69,7 +69,7 @@ class CopyCommand : CliktCommand(name = "copy") {
             guard?.let {
                 GuardGate(it) { _, reasons -> echo("  waiting for the source: ${reasons.joinToString("; ")}") }
             } ?: UnguardedGate
-        MaskingEngine.create(config.masking, StaticKeyProvider(config.masking), loaded.baseDir).use { engine ->
+        MaskingEngine.create(config.masking, KeyProviders.create(config.masking), loaded.baseDir).use { engine ->
             val listener =
                 object : JobListener {
                     override fun chunkPreempted(

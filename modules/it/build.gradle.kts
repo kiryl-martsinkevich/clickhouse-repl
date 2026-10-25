@@ -9,6 +9,7 @@ dependencies {
     testImplementation(project(":app"))
     testImplementation(project(":cli"))
     testImplementation(project(":devidp"))
+    testImplementation(testFixtures(project(":masking")))
     testImplementation(libs.spring.boot)
     testImplementation(libs.clikt)
     testImplementation(platform(libs.spring.boot.bom))

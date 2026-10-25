@@ -354,7 +354,27 @@ Exit criteria
 - Failover drill in staging: promoting the DR side stops all replication reads within one poll interval.
 - Runbook reviewed by on-call; dashboards and alerts live in staging.
 
-### M8 — Fortanix DSM key provider (S/M)
+### M8 — Fortanix DSM key provider (S/M) — ✅ done (against a DSM mock)
+
+Delivered:
+- `FortanixKeyProvider`:
+  - session auth with an app API key;
+  - envelope mode: a non-exportable KEK decrypts the wrapped master key;
+  - export mode: reads an exportable HMAC object;
+  - one call per process.
+- Config validation: https only; exactly one mode.
+- Workers take no work while the key cannot be loaded (fail closed, retried every 30 s).
+- `clickhouse-repl dsm-wrap` for the BYOK migration.
+- Tests against `MockDsm` (masking test fixtures):
+  - unit tests (identical keys and masked values, 401, unreachable, wrong KEK);
+  - CLI tests;
+  - `FortanixIT`: DSM down → no work taken; DSM up → the job completes with masked values identical to the static provider's.
+
+Open:
+- Run against a real DSM sandbox and tenant (auth method, TLS trust, object policies).
+- Security review of the DSM credential handling with the key custodians.
+- Client-certificate authentication is not implemented (API key only).
+
 
 Scope
 - `fortanix` `MasterKeyProvider`: authenticate (API key or client certificate), unwrap the HMAC master key with a non-exportable KEK (or export an exportable HMAC security object), cache in memory, version mapping.

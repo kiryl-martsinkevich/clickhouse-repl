@@ -530,7 +530,7 @@ for reviewer attention. It is advisory only.
 | Provider | Milestone | Behaviour |
 |----------|-----------|-----------|
 | `static` | v1 (M1) | A ≥ 256-bit random key (hex or base64) read from a secret reference — a mounted Kubernetes Secret file (`${file:/var/run/secrets/…}`) or an env var. A literal key in YAML is a validation error. The config declares its `version`. |
-| `fortanix` | Later (see PLAN) | Fortanix DSM, BYOK. Envelope model: a DSM-held, non-exportable KEK wraps the HMAC master key; the wrapped blob and key version are stored with the config/secret; workers authenticate to DSM (app API key or client certificate) and **unwrap once at start-up**; derivation and per-value HMAC stay local. Per-value DSM calls are not used (throughput). If the HMAC key is instead held as an exportable DSM security object, the provider exports it at start-up under the same rules. |
+| `fortanix` | Implemented (M8) | Fortanix DSM, BYOK. Envelope model: a DSM-held, non-exportable KEK wraps the HMAC master key; the wrapped blob and key version are stored with the config/secret; workers authenticate to DSM (app API key or client certificate) and **unwrap once at start-up**; derivation and per-value HMAC stay local. Per-value DSM calls are not used (throughput). If the HMAC key is instead held as an exportable DSM security object, the provider exports it at start-up under the same rules. |
 
 - **Key rotation** changes every masked value and breaks consistency with data already on
   targets. It is a planned event: bump the version, then run a `rekey` job (full re-copy of
@@ -538,6 +538,12 @@ for reviewer attention. It is advisory only.
   key version per table in `repl_meta.tables`, and writes with a different version are refused
   except by `rekey`.
   Implemented in M7 as `POST /api/v1/admin/rekey` and `clickhouse-repl rekey --target …` (admin). For each table on the target masked with another realm or key version, a rekey job re-copies the COB dates it holds (or the whole table) with the current key.
+- Implementation (M8):
+  - `masking.key.fortanix` with `endpoint`, `api_key`, and either `kek` + `wrapped_key` (envelope; DSM decrypt) or `key_name` (export).
+  - The key is loaded once per process, through session auth then decrypt or export.
+  - While the key cannot be loaded, workers take no work, so a DSM outage at start-up fails closed. Retries happen every 30 s.
+  - `clickhouse-repl dsm-wrap` wraps the existing static key for the migration.
+  - Tested against a mock of the DSM REST API: identical masked output and fail-closed behaviour.
 - Moving from `static` to `fortanix` **without** rotating keeps masked values identical, as
   long as the same key material is imported into DSM (BYOK) and the version is unchanged.
 
@@ -759,7 +765,7 @@ than `lag_alert_after`.
 
 ### 9.1 Format and lifecycle
 
-- One YAML file (or a directory of YAML files merged in lexical order), kept in git and changed through code review. Secrets are references (`${file:…}`, `${env:…}`, later `${fortanix:…}`), never literals.
+- One YAML file (or a directory of YAML files merged in lexical order), kept in git and changed through code review. Secrets are references (`${file:…}`, `${env:…}`), never literals; Fortanix DSM keys are configured under `masking.key.fortanix`.
 - Validated by JSON Schema plus semantic checks (§9.3) in CI (`clickhouse-repl validate-config`) and at load.
 - Hot reload: `POST /api/v1/admin/config/reload` or SIGHUP; a new immutable version is activated only if valid. Running jobs keep the version they started with; each job records its config version.
 

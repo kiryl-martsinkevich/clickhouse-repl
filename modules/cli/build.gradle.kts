@@ -7,10 +7,12 @@ dependencies {
     implementation(project(":config"))
     implementation(project(":transfer"))
     implementation(project(":guard"))
+    implementation(project(":masking"))
     implementation(libs.clikt)
     implementation(platform(libs.jackson.bom))
     implementation(libs.jackson.databind)
 
+    testImplementation(testFixtures(project(":masking")))
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
     testImplementation(kotlin("test"))

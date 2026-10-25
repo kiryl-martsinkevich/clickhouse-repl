@@ -156,10 +156,30 @@ data class Masking(
 )
 
 data class MaskingKey(
-    /** `static` in v1; `fortanix` is planned (PLAN M8). */
+    /** `static` (key material from a secret) or `fortanix` (Fortanix DSM, BYOK; SPEC §6.2). */
     val provider: String,
+    /** The key material for `static`. */
     val ref: SecretRef? = null,
     val version: Int,
+    val fortanix: FortanixKey? = null,
+)
+
+/**
+ * Where the master key comes from in Fortanix DSM. Either envelope mode, where a non-exportable
+ * [kek] decrypts [wrappedKey], or export mode, which reads the exportable HMAC security object
+ * [keyName]. Workers authenticate with an app API key and fetch the key once at start-up.
+ */
+data class FortanixKey(
+    /** DSM base URL, e.g. https://eu.smartkey.io; https is required except for localhost. */
+    val endpoint: String,
+    /** The DSM app API key (base64 `app-id:secret`), as a secret reference. */
+    val apiKey: SecretRef,
+    /** Name of the KEK security object (envelope mode). */
+    val kek: String? = null,
+    /** The wrapped master key (JSON from `clickhouse-repl dsm-wrap`), as a secret reference. */
+    val wrappedKey: SecretRef? = null,
+    /** Name of an exportable HMAC security object holding the master key (export mode). */
+    val keyName: String? = null,
 )
 
 data class Dictionary(

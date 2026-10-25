@@ -1,6 +1,7 @@
 plugins {
     id("chrepl.kotlin-conventions")
     `java-library`
+    `java-test-fixtures`
     alias(libs.plugins.jmh)
 }
 
@@ -10,6 +11,9 @@ dependencies {
     implementation(libs.bouncycastle)
     implementation(platform(libs.jackson.bom))
     implementation(libs.jackson.databind)
+
+    testFixturesImplementation(platform(libs.jackson.bom))
+    testFixturesImplementation(libs.jackson.databind)
 
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)

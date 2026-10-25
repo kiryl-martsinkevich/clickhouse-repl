@@ -10,12 +10,13 @@ import chrepl.guard.OpsFlags
 import chrepl.guard.Reason
 import chrepl.guard.SourceGuard
 import chrepl.masking.MaskingEngine
-import chrepl.masking.keys.StaticKeyProvider
+import chrepl.masking.keys.KeyProviders
 import chrepl.transfer.ClientFactory
 import chrepl.transfer.CopySession
 import chrepl.transfer.PartitionLocks
 import chrepl.transfer.ReadGate
 import chrepl.transfer.UnguardedGate
+import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 
@@ -187,6 +188,7 @@ class Runtime(
     val guard: SourceGuard?,
     private val workerId: String,
     private val guardWait: Duration = Duration.ofDays(1),
+    private val keyRetry: Duration = Duration.ofSeconds(30),
     /** Runs after admission, just before a read starts (diagnostics and tests). */
     private val beforeRead: (queryId: String) -> Unit = {},
 ) : AutoCloseable {
@@ -199,8 +201,33 @@ class Runtime(
     fun engine(version: String): MaskingEngine =
         engines.computeIfAbsent(version) {
             val config = configs.get(version)
-            MaskingEngine.create(config.masking, StaticKeyProvider(config.masking, secrets), configs.baseDir)
+            MaskingEngine.create(config.masking, KeyProviders.create(config.masking, secrets), configs.baseDir)
         }
+
+    @Volatile private var keyFailedAt = 0L
+
+    @Volatile var keyError: String? = null
+        private set
+
+    /**
+     * Whether the masking key of [version] is loaded or can be loaded now. When the key store (e.g.
+     * Fortanix DSM) is unreachable, workers take no work at all (fail closed, PLAN M8); a failed load
+     * is retried at most every [keyRetry].
+     */
+    fun keyReady(version: String): Boolean {
+        if (engines.containsKey(version)) return true
+        if (System.nanoTime() - keyFailedAt < keyRetry.toNanos()) return false
+        return try {
+            engine(version)
+            keyError = null
+            true
+        } catch (e: Exception) {
+            keyFailedAt = System.nanoTime()
+            keyError = Worker.describe(e)
+            log.warn("masking key for config {} unavailable; taking no work: {}", version, keyError)
+            false
+        }
+    }
 
     fun session(
         version: String,
@@ -295,3 +322,5 @@ class Runtime(
         guard?.close()
     }
 }
+
+private val log = LoggerFactory.getLogger(Runtime::class.java)

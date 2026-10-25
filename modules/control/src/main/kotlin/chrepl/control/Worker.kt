@@ -1,6 +1,7 @@
 package chrepl.control
 
 import chrepl.clickhouse.CancelledException
+import chrepl.clickhouse.ClickHouseException
 import chrepl.clickhouse.Sql
 import chrepl.masking.MaskingConfigException
 import chrepl.transfer.Chunk
@@ -75,7 +76,8 @@ class Worker(
     fun step(): Boolean {
         // Planning and chunk copies read from DR; while paused or failed over neither starts, even for
         // unguarded sources. Assembly and finalisation touch only targets and may finish.
-        val reads = !stopped()
+        // No masking key (e.g. Fortanix DSM unreachable): take no work at all (fail closed).
+        val reads = !stopped() && runtime.keyReady(configs.currentVersion)
         // Planning reads DR metadata, which the guard allows only while GREEN or AMBER (SPEC §4.4).
         return finishOne() ||
             assembleOne() ||
@@ -660,11 +662,16 @@ class Worker(
         private val QUOTED = Regex("""'(?:[^'\\]|\\.)*'""")
 
         /**
-         * A failure as shown to users (job reason, chunk error). ClickHouse errors can quote values
-         * (e.g. a value that failed to parse); quoted literals are redacted so that no source data
-         * reaches the API, the portal or the audit log.
+         * A failure as shown to users (job reason, chunk error). ClickHouse server errors can quote
+         * values (e.g. a value that failed to parse); their quoted literals are redacted so that no
+         * source data reaches the API, the portal or the audit log. The tool's own messages quote
+         * only names and are kept.
          */
-        fun describe(e: Throwable): String = "${e::class.simpleName}: ${e.message?.replace(QUOTED, "'…'")?.take(500) ?: ""}"
+        fun describe(e: Throwable): String {
+            val fromServer = generateSequence(e) { it.cause }.any { it is ClickHouseException }
+            val message = e.message ?: ""
+            return "${e::class.simpleName}: ${(if (fromServer) message.replace(QUOTED, "'…'") else message).take(500)}"
+        }
 
         fun chunkJson(chunk: Chunk): Map<String, Any?> =
             mapOf(

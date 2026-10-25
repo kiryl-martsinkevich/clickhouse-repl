@@ -111,7 +111,14 @@ internal class RuleContext(
             }
 
             SecretRef.Kind.UNSUPPORTED -> {
-                val hint = if (ref.target == "fortanix") " (Fortanix DSM support is planned for M8)" else ""
+                val hint =
+                    if (ref.target ==
+                        "fortanix"
+                    ) {
+                        " (Fortanix DSM is configured under masking.key.fortanix, not as a secret scheme)"
+                    } else {
+                        ""
+                    }
                 error(Code.SECRET_SCHEME, path, "unsupported secret scheme '${ref.target}'$hint; use file or env")
                 return null
             }
