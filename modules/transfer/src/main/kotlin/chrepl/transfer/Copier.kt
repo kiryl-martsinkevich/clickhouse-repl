@@ -163,7 +163,18 @@ internal class PartitionAssembler(
                     )
                 }
                 for (chunk in chunkStagings) targetClient.execute("ALTER TABLE $stg ATTACH PARTITION ID $pid FROM $db.${Sql.ident(chunk)}")
-                targetClient.execute("ALTER TABLE $table REPLACE PARTITION ID $pid FROM $stg")
+                val stagedParts =
+                    targetClient.queryScalar(
+                        "SELECT count() FROM system.parts WHERE database = {db:String} AND table = {t:String} AND partition_id = {pid:String} AND active",
+                        mapOf("param_db" to target.database, "param_t" to staging, "param_pid" to partitionId),
+                    )
+                if (stagedParts == "0") {
+                    // Nothing left in the slice: empty the partition explicitly. ClickHouse 26.8 refuses REPLACE PARTITION
+                    // from an empty source (found in testing); DROP PARTITION is atomic too.
+                    targetClient.execute("ALTER TABLE $table DROP PARTITION ID $pid")
+                } else {
+                    targetClient.execute("ALTER TABLE $table REPLACE PARTITION ID $pid FROM $stg")
+                }
                 targetClient
                     .queryScalar(
                         "SELECT count() FROM $table WHERE _partition_id = {pid:String}",

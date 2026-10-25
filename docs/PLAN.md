@@ -259,6 +259,7 @@ Delivered:
 Found while testing (fixed and covered):
 1. `_partition_id = …` alone does not satisfy `force_index_by_date`, so whole-partition reads of COB tables failed on DR. They now carry the partition's date range.
 2. A failing poll retried every scheduler tick and exhausted the DR reader's query quota (the quota held, as designed). Failed polls now wait for the interval.
+3. ClickHouse 26.8 refuses `REPLACE PARTITION` from an empty staging table (it would silently drop the destination). Emptying a partition, for example a partition dropped at the source or a COB slice that no longer exists, now uses an explicit `DROP PARTITION` under the same lock.
 
 Deviations:
 - The RED-period test lasts ~10 s instead of 10 minutes; the mechanism is the same.
