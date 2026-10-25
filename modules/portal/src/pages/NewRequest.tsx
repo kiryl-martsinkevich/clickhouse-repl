@@ -269,6 +269,7 @@ export function NewRequestPage() {
             <p>
               Total {formatBytes(estimate.bytes)} · {estimate.queued_jobs} ad-hoc job(s) ahead in the queue.
             </p>
+            <p className="hint">Sizes count whole partitions, so they are an upper bound when a partition holds several COB dates.</p>
             {!estimate.source_available && <p className="warn">The DR cluster is busy right now ({estimate.source_reason}); the copy will wait until it is free.</p>}
             <h3>Last copied</h3>
             {recent.length === 0 ? (

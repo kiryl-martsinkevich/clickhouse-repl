@@ -1,3 +1,13 @@
+// The Spring Boot plugin's buildpack support pulls commons-lang3 3.16 (GHSA-j288-q9x7-2f5v) onto the
+// build classpath; require the patched version.
+buildscript {
+    dependencies {
+        constraints {
+            classpath("org.apache.commons:commons-lang3:3.21.0")
+        }
+    }
+}
+
 plugins {
     id("chrepl.spring-conventions")
     alias(libs.plugins.spring.boot)

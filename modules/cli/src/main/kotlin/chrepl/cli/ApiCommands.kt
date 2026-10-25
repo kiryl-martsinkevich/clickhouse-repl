@@ -240,7 +240,10 @@ class DryRunCommand : SelectionCommand("dry-run") {
                         ),
                     )
                 }
-                appendLine("total ${estimate.path("bytes").asLong()} bytes; ${estimate.path("queued_jobs").asLong()} ad-hoc jobs queued")
+                appendLine(
+                    "total ${estimate.path("bytes").asLong()} bytes (whole partitions: an upper bound for COB slices); " +
+                        "${estimate.path("queued_jobs").asLong()} ad-hoc jobs queued",
+                )
                 if (!estimate
                         .path(
                             "source_available",

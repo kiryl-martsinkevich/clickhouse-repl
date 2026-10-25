@@ -9,14 +9,68 @@ environments (QA, UAT, perf), with consistent masking of sensitive columns.
 - **Ad-hoc mode**: QA users request a table or dataset for a COB date from a web portal, and the job runs in the background.
 - **Production first**: reads come only from the passive DR datacentre — the active DC is never contacted. A Source Guard admits reads only while DR replication is healthy, pre-empts them when it falls behind, stops immediately if DR becomes active, and fails closed.
 
-Status: M0 (configuration), M1 (masking engine), M2 (batch transfer), M3 (Source Guard) and M4 (control plane: jobs, workers, REST API, CLI client) M5 (continuous mode), M6 (portal) and M7 (hardening: views, retention, rekey, metrics, Helm) and M8 (Fortanix DSM key provider) implemented: the whole plan; see the plan for what comes next.
+Status: every milestone of the [plan](docs/PLAN.md) is implemented (M0–M8). Items that need people or a
+staging environment are listed there as open: the staging load test and sign-off, the failover drill,
+the pen test, and the run against a real Fortanix DSM tenant.
 
 Docs:
 
 - [Design specification](docs/SPEC.md)
-- [Runbook](docs/runbook.md) · [Load test](docs/loadtest.md) · [Security review](docs/security-review.md)
+- [Runbook](docs/runbook.md) · [Load test](docs/loadtest.md) · [Security review](docs/security-review.md) · [Dependency and image scanning](SECURITY.md)
 - [Implementation plan](docs/PLAN.md)
 - [Example configuration](docs/examples/replicator.yaml)
+
+## Demo
+
+One command starts a small but complete setup in Docker:
+- a "prod" ClickHouse replica and its "DR" replica (ReplicatedMergeTree through Keeper);
+- a `qa1` target, Postgres, a development-only OIDC provider and the app.
+
+It then seeds fictional trading data on prod and copies one COB date of the `trading-eod` dataset
+to `qa1` through the API, as QA user `alice` would. Needs Docker with Compose, JDK 21 and Node.js 22.
+
+```bash
+demo/run.sh          # build, start, seed, copy, and show source vs masked rows
+demo/run.sh down     # remove everything
+```
+
+What it shows (abridged output):
+
+```text
+▶ Waiting for the Source Guard to see DR as GREEN
+{"level":"GREEN","hosts":{"dr:8123":"GREEN"},"reasons":[],"active_reads":0,"paused":false,"guarded":true,"replica_delay_seconds":0}
+
+▶ alice (QA) estimates a copy of the trading-eod dataset for COB 2026-10-01 to qa1
+trading.trades                        1 partitions           6000 rows           215821 bytes
+trading.positions                     1 partitions           3000 rows            49107 bytes
+crm.customers                         1 partitions           2000 rows            49061 bytes
+refdata.instruments                   1 partitions            500 rows             6674 bytes
+
+▶ ... and submits it
+jb2cbf33aa31b43e9 PENDING
+jb2cbf33aa31b43e9 RUNNING qa1 chunks 3/4 partitions 3/4 rows 5000
+jb2cbf33aa31b43e9 SUCCEEDED qa1 chunks 4/4 partitions 4/4 rows 5500
+
+▶ Production data (queried on prod by the demo, never by the tool)
+   ┌─trade_id─┬─customer_id─┬─account_number───────┬─counterparty_name─┬─notional─┬─trader_comment─────┬─client_email─────┐
+1. │        0 │      100000 │ GB29NWBK601600000000 │ Northwind Capital │        0 │ call client 100000 │ client0@bank.com │
+2. │        1 │      100001 │ GB29NWBK601600000001 │ Cobalt Capital    │     0.01 │ ᴺᵁᴸᴸ               │ client1@bank.com │
+
+▶ The same rows on qa1: masked consistently, pass columns unchanged
+   ┌─trade_id─┬──customer_id─┬─account_number───────┬─counterparty_name────┬─notional─┬─trader_comment─┬─client_email────────┐
+1. │        0 │ 901213632431 │ LC49OBHQ249198435049 │ Acme Holdings        │        0 │ ᴺᵁᴸᴸ           │ esjfrd0@example.com │
+2. │        1 │ 978569096350 │ EE21LEHD766762948712 │ Foxglove Investments │     0.01 │ ᴺᵁᴸᴸ           │ zgecue2@example.com │
+
+▶ Consistency: masked customer ids still join across tables
+   ┌─trades─┬─with_customer─┐
+1. │   2000 │          2000 │
+
+▶ The tool never touched prod
+queries on prod by repl_* users: 0
+```
+
+Then open the portal at http://localhost:8080 and sign in as `alice`, `bob` (QA), `olga`
+(operator) or `root` (admin) on the dev sign-in page.
 
 ## Build
 
@@ -66,7 +120,7 @@ Settings: `chrepl.portal.issuer` (the OIDC issuer the browser signs in with), `c
 
 ## Deploy
 
-- `Dockerfile`: distroless runtime image. Build the jar first with `./gradlew :app:bootJar`.
+- `Dockerfile`: minimal Chainguard JRE runtime image (non-root, no known CVEs; see [SECURITY.md](SECURITY.md)). Build the jar first with `./gradlew :app:bootJar`.
 - `deploy/helm/clickhouse-repl`:
   - one Deployment per role (`api`, `worker`, `scheduler`), with PodDisruptionBudgets;
   - a deny-by-default egress NetworkPolicy: DR replicas, targets, Postgres, OIDC and the key store only;
@@ -123,6 +177,8 @@ into the config (e.g. `sources.dr.shards[0].host`).
 | `modules/app` | Spring Boot application: REST API, OIDC resource server, process roles; serves the portal. |
 | `modules/portal` | Portal SPA (React + TypeScript, Vite) and its Playwright E2E specs. |
 | `modules/devidp` | Development-only OIDC provider for E2E tests and the demo. Never deploy it. |
-| `modules/cli` | `clickhouse-repl` command-line tool (`validate-config`, `copy`, and API commands `submit`, `dry-run`, `status`, `jobs`, `cancel`). |
+| `modules/cli` | `clickhouse-repl` command-line tool (`validate-config`, `copy`, `dsm-wrap`, and API commands `submit`, `dry-run`, `status`, `jobs`, `cancel`, `rekey`). |
 | `modules/it` | Docker integration tests: `./gradlew :it:test -Pit` (optionally `-Pchrepl.it.image=clickhouse/clickhouse-server:26.8`). |
-| `build-logic` | Shared Gradle conventions (Kotlin, JDK 21 toolchain, ktlint, JUnit). |
+| `build-logic` | Shared Gradle conventions (Kotlin, JDK 21 toolchain, ktlint, JUnit, dependency locking). |
+| `deploy/` | DR and target provisioning SQL, Helm chart, monitoring (dashboard, alerts), sample dataset. |
+| `demo/` | The Docker Compose demo (`demo/run.sh`). |

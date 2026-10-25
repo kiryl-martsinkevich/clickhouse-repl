@@ -46,7 +46,7 @@ before production (see "Open items").
 
 ## Supply chain and runtime
 
-- The image is distroless Java 21: no shell, non-root (uid 65532). The root filesystem is read-only with an emptyDir `/tmp`. All capabilities are dropped and seccomp is RuntimeDefault.
+- The image is the Chainguard JRE pinned by digest: no shell or package manager, non-root (uid 65532), no known CVEs at the last scan. The root filesystem is read-only with an emptyDir `/tmp`. All capabilities are dropped and seccomp is RuntimeDefault.
 - Dependencies are pinned (Gradle version catalog, `package-lock.json`). CI scans them with OSV-Scanner (see `SECURITY.md`).
 
 ## Open items (need people or environments)

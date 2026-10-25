@@ -1,0 +1,7 @@
+<clickhouse>
+  <zookeeper><node><host>keeper</host><port>9181</port></node></zookeeper>
+  <macros><shard>01</shard><replica>dr</replica></macros>
+  <interserver_http_host>dr</interserver_http_host>
+  <merge_workload>background</merge_workload>
+  <mutation_workload>background</mutation_workload>
+</clickhouse>

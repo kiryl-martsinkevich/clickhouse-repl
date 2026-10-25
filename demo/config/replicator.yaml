@@ -1,0 +1,255 @@
+# Demo configuration (generated from docs/examples/replicator.yaml for demo/docker-compose.yml).
+# One DR replica ("dr"), the "prod" replica on the active-DC deny-list, one target ("qa1"), plain
+# HTTP inside the demo network, fast guard timings and host thresholds relaxed for a laptop.
+version: 1
+active_dc:
+  name: demo-prod
+  hosts:
+  - prod
+  cidrs:
+  - 172.28.0.10/32
+sources:
+  dr:
+    dc: dr
+    cluster_name: dr
+    clickhouse_version: '25.8'
+    tls: false
+    reader:
+      user: repl_reader
+      password: ${file:/var/run/secrets/chrepl/dr-reader-password}
+    guard:
+      user: repl_guard
+      password: ${file:/var/run/secrets/chrepl/dr-guard-password}
+    shards:
+    - name: s1
+      host: dr:8123
+    fail_closed_scope: cluster
+    dc_role_check:
+      foreign_activity: true
+      ignored_users:
+      - monitoring
+targets:
+  qa1:
+    hosts:
+    - qa1:8123
+    cluster_name: qa1
+    shards: 1
+    shard_mapping: single
+    tls: false
+    writer:
+      user: repl_writer
+      password: ${file:/var/run/secrets/chrepl/qa1-writer-password}
+    environment_marker: qa1
+    recent_copy_warning: 24h
+guard:
+  poll_interval: 2s
+  stale_after: 6s
+  stable_window: 5s
+  release_ratio: 0.8
+  thresholds:
+    replication:
+      max_replica_delay: 30s
+      max_queue_size: 50
+      max_queue_oldest_age: 120s
+      max_stuck_entries: 0
+      max_inflight_fetches: 4
+      block_on_readonly: true
+    host:
+      max_cpu_utilisation: 1.0
+      max_io_wait: 1.0
+      max_memory_ratio: 0.95
+    background:
+      max_active_merges: 10
+      max_mutation_bytes: 50GiB
+  concurrency:
+    global: 2
+    per_host: 1
+  preemption:
+    kill_grace: 5s
+  circuit_breaker:
+    max_preemptions: 5
+    within: 30m
+    open_for: 1h
+  blackout_windows: []
+masking:
+  realm: nonprod
+  key:
+    provider: static
+    ref: ${file:/var/run/secrets/chrepl/masking-key-v1}
+    version: 1
+  dictionaries:
+    first_names:
+      file: dictionaries/first_names_v1.txt
+    last_names:
+      file: dictionaries/last_names_v1.txt
+    company_names:
+      file: dictionaries/company_names_v2.txt
+  domains:
+    customer_id:
+      strategy: fpe_ff1
+      alphabet: digits
+      width: 12
+      approved_by: repo-owner
+    account_number:
+      strategy: tokenize
+      normalise:
+      - trim
+      collision_check: true
+    email:
+      strategy: email
+      local_part: tokenize
+      domain: map_to_example
+      normalise:
+      - trim
+      - lower
+    phone:
+      strategy: tokenize
+    first_name:
+      strategy: dictionary
+      dictionary: first_names
+    last_name:
+      strategy: dictionary
+      dictionary: last_names
+    counterparty_name:
+      strategy: dictionary
+      dictionary: company_names
+    customer_dates:
+      strategy: date_shift
+      max_days: 180
+    amount_noise:
+      strategy: numeric_noise
+      relative: 0.05
+    free_text:
+      strategy: 'null'
+tables:
+- source: trading.trades
+  cob_column: trade_date
+  partition_key: toYYYYMM(trade_date)
+  sharding_key: cityHash64(trade_id)
+  mv_mode: base_only
+  chunk:
+    max_bytes: 2GiB
+    max_seconds: 120
+  columns:
+    trade_id: pass
+    trade_date: pass
+    inserted_at: pass
+    instrument_id: pass
+    customer_id:
+      mask: customer_id
+    account_number:
+      mask: account_number
+    counterparty_name:
+      mask: counterparty_name
+    quantity: pass
+    price: pass
+    notional:
+      mask: amount_noise
+      entity_column: customer_id
+    trader_comment:
+      mask: free_text
+    tags: pass
+    attributes:
+      map_values:
+        client_email:
+          mask: email
+        client_phone:
+          mask: phone
+      default: pass
+- source: trading.positions
+  cob_column: cob_date
+  partition_key: toYYYYMM(cob_date)
+  sharding_key: cityHash64(instrument_id)
+  mv_mode: base_only
+  columns:
+    cob_date: pass
+    customer_id:
+      mask: customer_id
+    account_number:
+      mask: account_number
+    instrument_id: pass
+    quantity: pass
+    market_value:
+      mask: amount_noise
+      entity_column: customer_id
+- source: crm.customers
+  full_copy: true
+  max_full_copy_bytes: 5GiB
+  columns:
+    customer_id:
+      mask: customer_id
+    first_name:
+      mask: first_name
+    last_name:
+      mask: last_name
+    email:
+      mask: email
+    phone:
+      mask: phone
+    date_of_birth:
+      mask: customer_dates
+      entity_column: customer_id
+    onboarded_at:
+      mask: customer_dates
+      entity_column: customer_id
+    profile_json:
+      json_paths:
+        $.contact.email:
+          mask: email
+        $.contact.phone:
+          mask: phone
+        $.notes:
+          mask: free_text
+      default: pass
+    segment: pass
+- source: refdata.instruments
+  full_copy: true
+  max_full_copy_bytes: 2GiB
+  classification: non_pii
+  approved_by: repo-owner
+  unlisted_columns: pass
+datasets:
+- name: trading-eod
+  description: Trades and positions for a COB date, plus customers and instruments
+  tables:
+  - trading.trades
+  - trading.positions
+  - crm.customers
+  - refdata.instruments
+- name: trades-only
+  tables:
+  - trading.trades
+continuous: []
+scheduling:
+  queue_weights:
+    continuous: 3
+    adhoc: 1
+  max_running_jobs_per_user: 2
+access:
+- group: qa-trading
+  role: requester
+  datasets:
+  - trading-eod
+  - trades-only
+  targets:
+  - qa1
+  quota:
+    max_bytes_per_job: 50GiB
+    max_bytes_per_day: 500GiB
+    max_cob_dates_per_job: 10
+    max_concurrent_jobs: 4
+- group: uat-leads
+  role: requester
+  datasets:
+  - trading-eod
+  targets:
+  - qa1
+  quota:
+    max_bytes_per_job: 200GiB
+    max_bytes_per_day: 1TiB
+    max_cob_dates_per_job: 31
+    max_concurrent_jobs: 4
+- group: data-platform-ops
+  role: operator
+- group: data-platform
+  role: admin
