@@ -34,7 +34,6 @@ import chrepl.transfer.ClientFactory
 import chrepl.transfer.CopyJob
 import chrepl.transfer.JobListener
 import chrepl.transfer.TableResult
-import com.fasterxml.jackson.databind.node.ArrayNode
 import com.fasterxml.jackson.databind.node.ObjectNode
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
@@ -81,40 +80,7 @@ class GuardIT {
     }
 
     /** The example config pointed at prod/DR/qa1 containers, with a DR source and fast guard timings. */
-    private val guardedConfig: ObjectNode.() -> Unit =
-        {
-            ((get("active_dc") as ObjectNode).get("hosts") as ArrayNode).add("127.0.0.42") // prod
-            val dr = child("sources").child("dr")
-            dr.put("dc", "dr")
-            dr
-                .putArray("shards")
-                .addObject()
-                .put("name", "s1")
-                .put("host", topology.dr.hostPort)
-            dr
-                .child("dc_role_check")
-                .putArray("ignored_users")
-                .add("monitoring")
-                .add("default") // default = the test's DBA
-            val qa1 = child("targets").child("qa1")
-            qa1.putArray("hosts").add(ItCluster.qa[0].hostPort)
-            qa1.put("shards", 1).put("shard_mapping", "single")
-            val guard = child("guard")
-            guard.put("poll_interval", "1s").put("stale_after", "3s").put("stable_window", "2s")
-            guard
-                .child("thresholds")
-                .child("replication")
-                .put("max_queue_size", 3)
-                .put("max_queue_oldest_age", "20s")
-            // Host-wide CPU/IO counters include the build machine; these tests are about replication and DR activity.
-            guard
-                .child("thresholds")
-                .child("host")
-                .put("max_cpu_utilisation", 1.0)
-                .put("max_io_wait", 1.0)
-            guard.putArray("blackout_windows")
-            guard.child("concurrency").put("global", 1)
-        }
+    private val guardedConfig: ObjectNode.() -> Unit get() = topology.config()
 
     @AfterAll
     fun stop() = topology.close()

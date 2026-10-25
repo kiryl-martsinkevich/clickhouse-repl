@@ -266,7 +266,7 @@ continuous:
     watermark_column: inserted_at
     interval: 60s
     overlap: 10m
-    dedupe: replace_partition                # replace_partition | replacing_merge_tree
+    dedupe: replace_partition                # replace_partition (replacing_merge_tree: not implemented yet)
     only_recent_partitions: 2                # never backfill old months via continuous mode
     lag_slo: 5m
     lag_alert_after: 30m

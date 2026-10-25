@@ -3,6 +3,8 @@ package chrepl.app
 import chrepl.config.model.Role
 import chrepl.control.Catalog
 import chrepl.control.ChunkView
+import chrepl.control.ContinuousService
+import chrepl.control.ContinuousView
 import chrepl.control.CopyMode
 import chrepl.control.Estimate
 import chrepl.control.GuardView
@@ -103,8 +105,28 @@ class ApiRoleCondition : Condition {
 class ApiController(
     private val jobs: JobService,
     private val ops: OpsService,
+    private val continuous: ContinuousService,
     private val principals: Principals,
 ) {
+    @GetMapping("/continuous")
+    fun continuous(
+        @AuthenticationPrincipal jwt: Jwt,
+    ): List<ContinuousView> = continuous.list(principals.of(jwt))
+
+    @PostMapping("/continuous/{name}/pause")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    fun pauseContinuous(
+        @AuthenticationPrincipal jwt: Jwt,
+        @PathVariable name: String,
+    ) = continuous.pause(principals.of(jwt), name)
+
+    @PostMapping("/continuous/{name}/resume")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    fun resumeContinuous(
+        @AuthenticationPrincipal jwt: Jwt,
+        @PathVariable name: String,
+    ) = continuous.resume(principals.of(jwt), name)
+
     @GetMapping("/me")
     fun me(
         @AuthenticationPrincipal jwt: Jwt,

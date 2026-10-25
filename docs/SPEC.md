@@ -701,6 +701,29 @@ For tables that are mutated, re-loaded, or have no usable watermark:
 Cron-driven full copy of a table or dataset (e.g. reference data nightly at 03:00),
 optionally restricted to the last N partitions.
 
+### 8.3.1 Implementation notes (M5)
+
+- **Scheduler.** One leader across all `scheduler` processes, elected with a Postgres advisory lock held on a dedicated connection.
+- **Streams.** Each (continuous entry, table, target) is a stream with state in `continuous_state`. A poll:
+  - reads DR metadata only while the guard is GREEN or AMBER, and not while paused or failed over;
+  - submits a whole-partition job (`jobs.partitions`) to the `continuous` queue;
+  - is applied (fingerprints, watermarks, `synced_as_of`) only after that job SUCCEEDED, so a failed or cancelled copy is retried by the next poll.
+- **Failed polls count as polls.** The next attempt waits for `interval`. In testing, a tight retry loop exhausted the reader's hourly query quota within minutes, and the DR quota stopped it as designed.
+- **Metadata fingerprint.** Per shard and partition: `sum(rows) / max(max_block_number) / max(mutation version)` from `system.parts`.
+  - It changes on inserts, mutations and deletes, but not on merges (checked on 25.8).
+  - `data_version` is not usable because plain merges change it.
+  - `verify: checksum` adds a guarded `count() ‖ sum(cityHash64(*))` read per changed partition, and skips a re-copy when the content is unchanged.
+- **`append_watermark`.**
+  - Only partitions whose fingerprint changed are read.
+  - The watermark query (guarded, per shard and per partition) finds the partitions that have rows with `watermark_column > last − overlap`; those are re-assembled through staging/REPLACE, so overlap duplicates cannot occur.
+  - Rows stamped earlier than `last − overlap` are not picked up (late beyond overlap).
+  - Partitions dropped at the source are not dropped on the target in this mode; use `partition_fingerprint` with `sync_drops` for that.
+- **Whole-partition reads of COB tables** carry the partition's own min/max date on `cob_column`. `_partition_id = …` alone does not satisfy the reader profile's `force_index_by_date` (found in M5 testing).
+- **`scheduled_full_refresh`** fires when the cron matches a minute since the last run, in the entry's time zone. After an outage longer than two days it catches up with a single run. A `full_copy` table is copied whole. With `only_recent_partitions`, the newest N partitions are copied. Otherwise every source partition is copied, and target partitions missing at the source are emptied.
+- **Lag** is `now − synced_as_of`. `synced_as_of` is the time of the last poll that left the target in sync, minus DR's replica delay at that poll, so it includes the DR replication component. `sloBreached` means lag > `lag_slo`; `alerting` means lag > `lag_slo + lag_alert_after`. Both are exposed as `chrepl_continuous_lag_seconds` and `chrepl_continuous_alerting` on `/actuator/prometheus`.
+- **Not implemented:** `dedupe: replacing_merge_tree`. Config validation rejects it.
+- **Recent-copy confirmation.** Ad-hoc requests do not need it for slices last written by the scheduler.
+
 ### 8.4 Monitoring
 
 Per (table, target): last successful sync, end-to-end lag, DR replication delay component,

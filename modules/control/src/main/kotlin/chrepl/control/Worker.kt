@@ -6,6 +6,7 @@ import chrepl.masking.MaskingConfigException
 import chrepl.transfer.Chunk
 import chrepl.transfer.CopyRecord
 import chrepl.transfer.CopySession
+import chrepl.transfer.DateBounds
 import chrepl.transfer.KeyRange
 import chrepl.transfer.PreemptedException
 import chrepl.transfer.SchemaException
@@ -94,7 +95,7 @@ class Worker(
                     "UPDATE jobs SET state = 'PLANNING', lease_owner = ?, lease_until = now() + make_interval(secs => ?), " +
                         "updated_at = now(), started_at = coalesce(started_at, now()) " +
                         "WHERE id = (SELECT id FROM jobs WHERE state = 'PENDING' ORDER BY queue = 'continuous' DESC, created_at " +
-                        "FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id, target, tables, cob_dates, config_version",
+                        "FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id, target, tables, cob_dates, partitions, config_version",
                     id,
                     leaseSeconds,
                 ) {
@@ -103,13 +104,14 @@ class Worker(
                         it.getString("target"),
                         it.strings("tables"),
                         it.dates("cob_dates"),
+                        it.stringsOrNull("partitions"),
                         it.getString("config_version"),
                     )
                 }
             } ?: return true.let { false }
         try {
             val session = runtime.session(job.configVersion, job.target) { _, _ -> }
-            val prepared = job.tables.map { session.prepare(it, job.cobDates) }
+            val prepared = job.tables.map { session.prepare(it, job.cobDates, job.partitions) }
             db.tx {
                 var seq = 0
                 for (table in prepared) {
@@ -170,6 +172,7 @@ class Worker(
         val target: String,
         val tables: List<String>,
         val cobDates: List<LocalDate>,
+        val partitions: List<String>?,
         val configVersion: String,
     )
 
@@ -363,7 +366,7 @@ class Worker(
                         "WHERE t1.state = 'READY' " +
                         "AND j1.state = 'RUNNING' ORDER BY t1.id FOR UPDATE OF t1 SKIP LOCKED LIMIT 1) AND j.id = t.job_id " +
                         "RETURNING t.id, t.job_id, t.table_name, t.target_index, t.partition_id, t.staging, t.rows_copied, " +
-                        "j.target, j.cob_dates, " +
+                        "j.target, j.cob_dates, j.partitions, " +
                         "j.config_version, j.requester",
                     id,
                     leaseSeconds,
@@ -378,6 +381,7 @@ class Worker(
                         it.getLong("rows_copied"),
                         it.getString("target"),
                         it.dates("cob_dates"),
+                        it.stringsOrNull("partitions"),
                         it.getString("config_version"),
                         it.getString("requester"),
                     )
@@ -408,7 +412,7 @@ class Worker(
                 return true
             }
             val spec = session.spec(task.table)
-            val selection = session.selection(spec, task.cobDates)
+            val selection = session.selection(spec, task.cobDates, task.partitions)
             val record =
                 CopyRecord(
                     task.jobId,
@@ -468,6 +472,7 @@ class Worker(
         val rows: Long,
         val target: String,
         val cobDates: List<LocalDate>,
+        val partitions: List<String>?,
         val configVersion: String,
         val requester: String,
     )
@@ -646,6 +651,8 @@ class Worker(
                 "partitionId" to chunk.partitionId,
                 "estimatedBytes" to chunk.estimatedBytes,
                 "selection" to (chunk.selection as? Selection.Cob)?.dates?.map { it.toString() },
+                "dateBounds" to
+                    chunk.dateBounds?.let { mapOf("column" to it.column, "from" to it.from.toString(), "to" to it.to.toString()) },
                 "range" to
                     chunk.range?.let {
                         mapOf(
@@ -674,6 +681,9 @@ class Worker(
                 dates?.let { Selection.Cob(it) } ?: Selection.All,
                 range,
                 (spec["estimatedBytes"] as Number).toLong(),
+                (spec["dateBounds"] as Map<String, String>?)?.let {
+                    DateBounds(it.getValue("column"), LocalDate.parse(it["from"]), LocalDate.parse(it["to"]))
+                },
             )
         }
     }

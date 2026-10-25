@@ -87,6 +87,8 @@ data class GuardStatus(
     val hosts: Map<String, GuardLevel>,
     val reasons: List<Reason>,
     val activeReads: Int,
+    /** Largest DR replica delay in the latest successful samples: how far DR trails the active DC. */
+    val replicaDelaySeconds: Long? = null,
 )
 
 /**
@@ -401,7 +403,8 @@ class SourceGuard(
         lock.withLock {
             val level = clusterLevel()
             val reasons = clusterReasons.ifEmpty { states.values.flatMap { it.reasons } }
-            GuardStatus(level, states.mapValues { it.value.level }, reasons, permits.size)
+            val delay = states.values.mapNotNull { s -> s.last?.takeIf { it.ok }?.replicaDelaySeconds }.maxOrNull()
+            GuardStatus(level, states.mapValues { it.value.level }, reasons, permits.size, delay)
         }
 
     override fun close() {

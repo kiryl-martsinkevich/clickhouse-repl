@@ -75,6 +75,8 @@ object ItFixtures {
         days: Int,
         rows: Int,
         idOffset: Long = 0,
+        /** SQL for `inserted_at`, over `number`. */
+        insertedAt: String = "toDateTime64('2026-10-01 00:00:00', 3) + number",
     ) {
         node.sql(
             """
@@ -82,7 +84,7 @@ object ItFixtures {
             SELECT
                 $idOffset + ${shard * 10_000_000L} + number AS trade_id,
                 toDate('$from') + intDiv(number, $rows) AS trade_date,
-                toDateTime64('2026-10-01 00:00:00', 3) + number AS inserted_at,
+                $insertedAt AS inserted_at,
                 number % 500 AS instrument_id,
                 100000 + number % 2000 AS customer_id,
                 concat('GB29NWBK6016', leftPad(toString(number % 2000), 8, '0')) AS account_number,

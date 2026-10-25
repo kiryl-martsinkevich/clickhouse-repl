@@ -4,7 +4,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 import java.nio.file.Path
 import java.time.Duration
 
-enum class ProcessRole { API, WORKER, ALL }
+/** `api` serves the REST API, `worker` executes jobs, `scheduler` runs continuous mode (one leader at a time). */
+enum class ProcessRole { API, WORKER, SCHEDULER, ALL }
 
 /** `chrepl.*` application properties. The replication config itself is the YAML at [config]. */
 @ConfigurationProperties("chrepl")

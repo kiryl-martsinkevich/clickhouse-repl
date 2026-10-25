@@ -126,4 +126,16 @@ class SourceQueriesTest {
             )
         assertEquals("SELECT `a` FROM `trading`.`trades` WHERE _partition_id = {pid:String}", read.sql)
     }
+
+    @Test
+    fun `whole-partition reads of a COB table carry the partition's date range for force_index_by_date`() {
+        val bounds = DateBounds("trade_date", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 31))
+        val chunk = Chunk("c", "s1", "202610", Selection.Partitions(setOf("202610")), null, 0, bounds)
+        val read = SourceQueries.read(spec, listOf("trade_date"), chunk)
+        assertEquals(
+            "SELECT `trade_date` FROM `trading`.`trades` WHERE _partition_id = {pid:String} AND `trade_date` BETWEEN {dlo:Date} AND {dhi:Date}",
+            read.sql,
+        )
+        assertEquals(mapOf("param_pid" to "202610", "param_dlo" to "2026-10-01", "param_dhi" to "2026-10-31"), read.params)
+    }
 }

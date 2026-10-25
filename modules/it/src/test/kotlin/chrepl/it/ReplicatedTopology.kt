@@ -1,5 +1,7 @@
 package chrepl.it
 
+import com.fasterxml.jackson.databind.node.ArrayNode
+import com.fasterxml.jackson.databind.node.ObjectNode
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
@@ -96,6 +98,45 @@ class ReplicatedTopology : AutoCloseable {
             )
         }
     }
+
+    /**
+     * The example config pointed at these containers: `dc: dr` source on DR, prod on the active-DC
+     * deny-list, qa1 as one shard, fast guard timings.
+     */
+    fun config(): ObjectNode.() -> Unit =
+        {
+            ((get("active_dc") as ObjectNode).get("hosts") as ArrayNode).add("127.0.0.42") // prod
+            val source = child("sources").child("dr")
+            source.put("dc", "dr")
+            source
+                .putArray("shards")
+                .addObject()
+                .put("name", "s1")
+                .put("host", this@ReplicatedTopology.dr.hostPort)
+            source
+                .child("dc_role_check")
+                .putArray("ignored_users")
+                .add("monitoring")
+                .add("default") // default = the test's DBA
+            val qa1 = child("targets").child("qa1")
+            qa1.putArray("hosts").add(ItCluster.qa[0].hostPort)
+            qa1.put("shards", 1).put("shard_mapping", "single")
+            val guard = child("guard")
+            guard.put("poll_interval", "1s").put("stale_after", "3s").put("stable_window", "2s")
+            guard
+                .child("thresholds")
+                .child("replication")
+                .put("max_queue_size", 3)
+                .put("max_queue_oldest_age", "20s")
+            // Host-wide CPU/IO counters include the build machine; these tests are about replication and DR activity.
+            guard
+                .child("thresholds")
+                .child("host")
+                .put("max_cpu_utilisation", 1.0)
+                .put("max_io_wait", 1.0)
+            guard.putArray("blackout_windows")
+            guard.child("concurrency").put("global", 1)
+        }
 
     /** Waits until DR has every part prod has. */
     fun awaitReplicated() {

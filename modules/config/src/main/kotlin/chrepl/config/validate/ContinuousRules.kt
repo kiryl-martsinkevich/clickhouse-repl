@@ -3,6 +3,7 @@ package chrepl.config.validate
 import chrepl.config.cron.CronValidator
 import chrepl.config.model.ContinuousJob
 import chrepl.config.model.ContinuousMode
+import chrepl.config.model.Dedupe
 import chrepl.config.model.UnlistedColumns
 import java.time.ZoneId
 
@@ -63,6 +64,14 @@ private fun RuleContext.checkJob(
     for (missing in required - present) error(Code.CONTINUOUS_OPTION_MISSING, "$path.$missing", "mode $mode requires '$missing'")
     for (extra in present - required - optional) {
         error(Code.CONTINUOUS_OPTION_UNSUPPORTED, "$path.$extra", "'$extra' does not apply to mode $mode")
+    }
+
+    if (job.dedupe == Dedupe.REPLACING_MERGE_TREE) {
+        error(
+            Code.CONTINUOUS_OPTION_UNSUPPORTED,
+            "$path.dedupe",
+            "dedupe: replacing_merge_tree is not implemented yet; use replace_partition (affected partitions are re-assembled)",
+        )
     }
 
     job.watermarkColumn?.let { column ->

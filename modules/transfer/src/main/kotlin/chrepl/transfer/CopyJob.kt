@@ -109,8 +109,10 @@ class CopySession(
     fun selection(
         spec: TableSpec,
         cobDates: List<LocalDate>,
+        partitions: List<String>? = null,
     ): Selection =
         when {
+            partitions != null -> Selection.Partitions(partitions.toSet())
             spec.fullCopy -> Selection.All
             cobDates.isEmpty() -> throw IllegalArgumentException("${spec.source} is COB-sliced: give at least one COB date")
             else -> Selection.Cob(cobDates.distinct().sorted())
@@ -148,9 +150,10 @@ class CopySession(
     fun prepare(
         tableName: String,
         cobDates: List<LocalDate>,
+        partitions: List<String>? = null,
     ): PreparedTable {
         val spec = spec(tableName)
-        val selection = selection(spec, cobDates)
+        val selection = selection(spec, cobDates, partitions)
         val (database, table) = tableName.split('.', limit = 2)
         val infos =
             sourceClients.mapValues { (shard, client) ->

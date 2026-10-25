@@ -7,6 +7,7 @@ dependencies {
     api(project(":guard"))
     api(platform(libs.spring.boot.bom))
     implementation(libs.postgresql)
+    implementation(libs.slf4j.api)
     implementation(libs.flyway.core)
     implementation(libs.flyway.postgresql)
     implementation(libs.jackson.kotlin)

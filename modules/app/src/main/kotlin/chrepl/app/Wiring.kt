@@ -3,11 +3,13 @@ package chrepl.app
 import chrepl.config.validate.SecretReader
 import chrepl.config.validate.ValidationOptions
 import chrepl.control.ConfigRegistry
+import chrepl.control.ContinuousService
 import chrepl.control.Db
 import chrepl.control.JobService
 import chrepl.control.OpsService
 import chrepl.control.PgOpsFlags
 import chrepl.control.Runtime
+import chrepl.control.Scheduler
 import chrepl.control.Worker
 import chrepl.control.WorkerSettings
 import chrepl.guard.GuardFactory
@@ -88,6 +90,20 @@ class Wiring(
     ) = OpsService(configs, flags, runtime)
 
     @Bean
+    fun continuousService(
+        db: Db,
+        configs: ConfigRegistry,
+    ) = ContinuousService(db, configs)
+
+    @Bean
+    fun schedulerLifecycle(
+        db: Db,
+        configs: ConfigRegistry,
+        runtime: Runtime,
+        jobs: JobService,
+    ) = SchedulerLifecycle(props, db, configs, runtime, jobs)
+
+    @Bean
     fun workerLifecycle(
         db: Db,
         configs: ConfigRegistry,
@@ -122,4 +138,27 @@ class WorkerLifecycle(
     }
 
     override fun isRunning() = worker != null
+}
+
+/** Runs the continuous-mode scheduler in processes with the `scheduler` role; only the lock holder schedules. */
+class SchedulerLifecycle(
+    private val props: AppProperties,
+    private val db: Db,
+    private val configs: ConfigRegistry,
+    private val runtime: Runtime,
+    private val jobs: JobService,
+) : SmartLifecycle {
+    @Volatile private var scheduler: Scheduler? = null
+
+    override fun start() {
+        if (!props.has(ProcessRole.SCHEDULER)) return
+        scheduler = Scheduler(db, configs, runtime, jobs).start()
+    }
+
+    override fun stop() {
+        scheduler?.close()
+        scheduler = null
+    }
+
+    override fun isRunning() = scheduler != null
 }

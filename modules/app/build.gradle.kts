@@ -13,6 +13,7 @@ dependencies {
     implementation(libs.jackson3.kotlin)
     implementation(libs.springdoc.webmvc.ui)
     implementation(libs.postgresql)
+    runtimeOnly(libs.micrometer.prometheus)
 
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.spring.boot.starter.test)

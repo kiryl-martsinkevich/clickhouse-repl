@@ -86,7 +86,8 @@ class ApiIT {
                 "--spring.datasource.password=chrepl",
                 "--spring.security.oauth2.resourceserver.jwt.public-key-location=file:$pem",
                 "--chrepl.config=$config",
-                "--chrepl.roles=all",
+                // No scheduler: the example's continuous jobs would copy in the background and skew the assertions.
+                "--chrepl.roles=api,worker",
                 "--chrepl.worker.threads=2",
                 "--chrepl.worker.idle-sleep=100ms",
             )
@@ -106,7 +107,7 @@ class ApiIT {
         ItCluster.sources.forEachIndexed { i, node -> ItFixtures.insertTrades(node, i, "2026-09-29", 6, 1_000) }
         postgres.dataSource().connection.use {
             it.createStatement().execute(
-                "TRUNCATE jobs, job_requesters, partition_tasks, chunks, copy_registry, audit_log, read_tokens, ops_flags CASCADE",
+                "TRUNCATE jobs, job_requesters, partition_tasks, chunks, copy_registry, audit_log, read_tokens, ops_flags, continuous_paused CASCADE",
             )
         }
     }
@@ -397,6 +398,32 @@ class ApiIT {
                 "root config.reload",
             ),
             actions,
+        )
+    }
+
+    @Test
+    fun `continuous jobs can be listed, and paused and resumed by operators`() {
+        val streams = call("GET", "/api/v1/continuous", alice).json
+        assertEquals(
+            setOf("trades-to-qa1", "positions-to-qa1", "refdata-nightly"),
+            streams.map { it.path("name").asText() }.toSet(),
+        )
+        // refdata-nightly covers two tables on two targets.
+        assertEquals(6, streams.size())
+        assertEquals("append_watermark", streams.first { it.path("name").asText() == "trades-to-qa1" }.path("mode").asText())
+
+        assertEquals(403, call("POST", "/api/v1/continuous/trades-to-qa1/pause", alice).status)
+        assertEquals(404, call("POST", "/api/v1/continuous/no-such-job/pause", olga).status)
+        assertEquals(204, call("POST", "/api/v1/continuous/trades-to-qa1/pause", olga).status)
+        val paused = call("GET", "/api/v1/continuous", alice).json.first { it.path("name").asText() == "trades-to-qa1" }
+        assertEquals("PAUSED", paused.path("status").asText())
+        assertEquals(204, call("POST", "/api/v1/continuous/trades-to-qa1/resume", olga).status)
+        assertTrue(
+            !call("GET", "/api/v1/continuous", alice)
+                .json
+                .first { it.path("name").asText() == "trades-to-qa1" }
+                .path("paused")
+                .asBoolean(),
         )
     }
 }

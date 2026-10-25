@@ -242,7 +242,28 @@ Exit criteria
 - IT: RBAC — user without access to a dataset/target gets 403; over-quota request rejected with a message.
 - IT: cancel during RUNNING → read killed, staging dropped, target unchanged.
 
-### M5 — Continuous mode (M)
+### M5 — Continuous mode (M) — ✅ done
+
+Delivered:
+- Whole-partition jobs (`Selection.Partitions`, `jobs.partitions`, Flyway V2).
+- A leader-elected `Scheduler` (`scheduler` process role) with per-stream state in Postgres. It covers:
+  - `append_watermark` (per-shard watermarks, overlap, `only_recent_partitions`);
+  - `partition_fingerprint` (merge-insensitive metadata fingerprint, `sync_drops`, optional `verify: checksum`);
+  - `scheduled_full_refresh` (cron and time zone).
+- Lag and SLO state per stream, `GET /api/v1/continuous` with operator pause/resume, and Prometheus gauges for lag and alerting.
+- Tests:
+  - 7 integration tests on the prod → DR topology (`ContinuousIT`): first sync, new rows, late rows within the overlap without duplicates, a mutation re-copied, a dropped partition dropped on the target, RED → no reads, lag grows and then catches up, pause/resume, no contact with prod;
+  - cron unit tests;
+  - an API test.
+
+Found while testing (fixed and covered):
+1. `_partition_id = …` alone does not satisfy `force_index_by_date`, so whole-partition reads of COB tables failed on DR. They now carry the partition's date range.
+2. A failing poll retried every scheduler tick and exhausted the DR reader's query quota (the quota held, as designed). Failed polls now wait for the interval.
+
+Deviations:
+- The RED-period test lasts ~10 s instead of 10 minutes; the mechanism is the same.
+- `dedupe: replacing_merge_tree` is not implemented and is rejected by config validation (moved to Later).
+
 
 Scope
 - Scheduler role creating poll jobs from `continuous:` entries (leader-elected).
@@ -301,6 +322,7 @@ Exit criteria
 ### Later (not scheduled)
 
 - Restricted custom filters (SPEC §7.6).
+- `dedupe: replacing_merge_tree` for append streams on very large partitions (SPEC §8.1).
 - Kafka-tap source for continuous mode (consume ingestion topics, zero ClickHouse reads).
 
 ---

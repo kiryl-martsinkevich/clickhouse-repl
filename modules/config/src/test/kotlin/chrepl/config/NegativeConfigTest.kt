@@ -196,6 +196,9 @@ class NegativeConfigTest {
                 Case("dataset with unknown table", Code.UNKNOWN_TABLE, "datasets[1].tables[0]") {
                     arr("/datasets/1/tables").set(0, textNode("trading.orders"))
                 },
+                Case("replacing_merge_tree dedupe (not implemented)", Code.CONTINUOUS_OPTION_UNSUPPORTED, "continuous[0].dedupe") {
+                    obj("/continuous/0").put("dedupe", "replacing_merge_tree")
+                },
                 Case("continuous interval below stable window", Code.INTERVAL_TOO_SHORT, "continuous[0].interval") {
                     obj("/continuous/0").put("interval", "30s")
                 },

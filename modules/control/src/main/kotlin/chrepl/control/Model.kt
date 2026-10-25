@@ -4,6 +4,9 @@ import chrepl.config.model.Role
 import java.time.Instant
 import java.time.LocalDate
 
+/** The requester recorded for scheduler-created jobs. */
+const val SCHEDULER = "scheduler"
+
 /** An authenticated caller: user name and OIDC groups (SPEC §7.4). */
 data class Principal(
     val user: String,

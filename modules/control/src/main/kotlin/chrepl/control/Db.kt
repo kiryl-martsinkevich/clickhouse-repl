@@ -129,5 +129,8 @@ internal fun ResultSet.instant(column: String): Instant? = getTimestamp(column)?
 @Suppress("UNCHECKED_CAST")
 internal fun ResultSet.strings(column: String): List<String> = (getArray(column)?.array as? Array<String>)?.toList() ?: emptyList()
 
+@Suppress("UNCHECKED_CAST")
+internal fun ResultSet.stringsOrNull(column: String): List<String>? = (getArray(column)?.array as? Array<String>)?.toList()
+
 internal fun ResultSet.dates(column: String): List<LocalDate> =
     (getArray(column)?.array as? Array<*>)?.map { (it as java.sql.Date).toLocalDate() } ?: emptyList()

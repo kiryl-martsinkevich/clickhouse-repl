@@ -9,7 +9,7 @@ environments (QA, UAT, perf), with consistent masking of sensitive columns.
 - **Ad-hoc mode**: QA users request a table or dataset for a COB date from a web portal, and the job runs in the background.
 - **Production first**: reads come only from the passive DR datacentre — the active DC is never contacted. A Source Guard admits reads only while DR replication is healthy, pre-empts them when it falls behind, stops immediately if DR becomes active, and fails closed.
 
-Status: M0 (configuration), M1 (masking engine), M2 (batch transfer), M3 (Source Guard) and M4 (control plane: jobs, workers, REST API, CLI client) implemented; see the plan for what comes next.
+Status: M0 (configuration), M1 (masking engine), M2 (batch transfer), M3 (Source Guard) and M4 (control plane: jobs, workers, REST API, CLI client) and M5 (continuous mode) implemented; see the plan for what comes next.
 
 Docs:
 
@@ -43,7 +43,7 @@ java -jar modules/app/build/libs/clickhouse-repl-app.jar
 
 | Setting | Meaning |
 |---------|---------|
-| `chrepl.roles` | `api` (REST API), `worker` (executes jobs), or `all`. Run several workers against one Postgres. |
+| `chrepl.roles` | `api` (REST API), `worker` (executes jobs), `scheduler` (continuous mode; one leader at a time), or `all`. Run several workers against one Postgres. |
 | `chrepl.auth.user-claim` / `groups-claim` | JWT claims for the user name (default `preferred_username`) and OIDC groups (default `groups`); groups map to roles through the config's `access` rules. |
 | `chrepl.worker.threads`, `lease` | Chunk concurrency per worker process and the chunk lease (default 4, 60 s). Cluster-wide read limits come from `guard.concurrency`. |
 

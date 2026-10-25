@@ -113,7 +113,12 @@ class JobService(
                 .recentCopyWarning
                 ?.value
         if (window != null && !request.confirmOverwriteRecent) {
-            val recent = recentCopies(request.target, tables, request.cobDates, window).filter { it.requester != principal.user }
+            // Continuous syncs overwrite their slices anyway, so only other people's copies need a confirmation.
+            val recent =
+                recentCopies(request.target, tables, request.cobDates, window).filter {
+                    it.requester != principal.user &&
+                        it.requester != SCHEDULER
+                }
             if (recent.isNotEmpty()) {
                 throw ConflictException(
                     "recently copied by others: " +
@@ -198,37 +203,44 @@ class JobService(
         }
     }
 
-    /** Creates a job on behalf of the scheduler (continuous / refresh jobs; PLAN M5). */
+    /**
+     * Creates a job on behalf of the scheduler (continuous polls and scheduled refreshes, SPEC §8).
+     * Returns null when a job with the same [coalesceKey] is still active. [partitions] selects
+     * whole partitions; null means [cobDates] (or a full copy).
+     */
     fun submitSystem(
         kind: String,
         target: String,
         tables: List<String>,
         cobDates: List<LocalDate>,
+        partitions: List<String>?,
         coalesceKey: String,
+        configVersion: String = configs.currentVersion,
     ): String? =
         db.tx {
-            if (long(
-                    "SELECT count(*) FROM jobs WHERE coalesce_key = ? AND state IN ('PENDING', 'PLANNING', 'RUNNING', 'FINALISING')",
+            exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", "submit:$coalesceKey")
+            val active =
+                long(
+                    "SELECT count(*) FROM jobs WHERE coalesce_key = ? AND state IN ('PENDING', 'PLANNING', 'RUNNING', 'FINALISING', 'CANCELLING')",
                     coalesceKey,
-                ) >
-                0
-            ) {
-                return@tx null
-            }
+                )
+            if (active > 0) return@tx null
             val id = chrepl.transfer.CopyJob.newJobId()
             update(
-                "INSERT INTO jobs (id, kind, queue, requester, target, tables, cob_dates, state, config_version, coalesce_key) " +
-                    "VALUES (?, ?, 'continuous', 'scheduler', ?, ?, ?, 'PENDING', ?, ?)",
+                "INSERT INTO jobs (id, kind, queue, requester, target, tables, cob_dates, partitions, state, config_version, " +
+                    "coalesce_key) VALUES (?, ?, 'continuous', ?, ?, ?, ?, ?, 'PENDING', ?, ?)",
                 id,
                 kind,
+                SCHEDULER,
                 target,
                 StringArray(tables),
                 DateArray(cobDates),
-                configs.currentVersion,
+                partitions?.let { StringArray(it) },
+                configVersion,
                 coalesceKey,
             )
-            update("INSERT INTO job_requesters (job_id, requester) VALUES (?, 'scheduler')", id)
-            audit("scheduler", "job.submit", id, mapOf("kind" to kind, "tables" to tables))
+            update("INSERT INTO job_requesters (job_id, requester) VALUES (?, ?)", id, SCHEDULER)
+            audit(SCHEDULER, "job.submit", id, mapOf("kind" to kind, "tables" to tables, "partitions" to partitions))
             id
         }
 

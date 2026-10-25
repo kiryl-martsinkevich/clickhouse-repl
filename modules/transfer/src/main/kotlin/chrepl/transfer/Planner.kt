@@ -18,6 +18,11 @@ sealed interface Selection {
     }
 
     data object All : Selection
+
+    /** Whole partitions by id (continuous mode and scheduled refreshes, SPEC §8). */
+    data class Partitions(
+        val ids: Set<String>,
+    ) : Selection
 }
 
 /** A key range `[from, to)` on the first primary-key column; null bounds are open. */
@@ -36,6 +41,18 @@ data class Chunk(
     val selection: Selection,
     val range: KeyRange?,
     val estimatedBytes: Long,
+    /**
+     * For whole-partition reads of a COB table: the partition's own date range on the COB column.
+     * It excludes nothing, but satisfies `force_index_by_date` in the reader profile, which a
+     * `_partition_id` predicate alone does not (found in M5 testing).
+     */
+    val dateBounds: DateBounds? = null,
+)
+
+data class DateBounds(
+    val column: String,
+    val from: LocalDate,
+    val to: LocalDate,
 )
 
 data class PartitionPlan(
@@ -82,6 +99,7 @@ class ChunkPlanner(
                 val selected =
                     when (selection) {
                         Selection.All -> parts
+                        is Selection.Partitions -> parts.filter { it.id in selection.ids }
                         is Selection.Cob -> cobPartitions(client, spec, parts, selection)
                     }
                 ShardPlan(
@@ -93,13 +111,23 @@ class ChunkPlanner(
                                 i,
                                 range,
                                 ->
-                                Chunk("$shard-${p.id}-$i", shard, p.id, selection, range, p.bytes / ranges.size)
+                                Chunk("$shard-${p.id}-$i", shard, p.id, selection, range, p.bytes / ranges.size, bounds(spec, selection, p))
                             }
                         PartitionPlan(p.id, chunks, p.rows, p.bytes)
                     },
                 )
             }
         return TablePlan(spec.source, selection, shardPlans)
+    }
+
+    private fun bounds(
+        spec: TableSpec,
+        selection: Selection,
+        p: Partition,
+    ): DateBounds? {
+        if (selection is Selection.Cob) return null
+        val column = spec.cobColumn ?: return null
+        return if (p.minDate != null && p.maxDate != null) DateBounds(column, p.minDate, p.maxDate) else null
     }
 
     internal data class Partition(

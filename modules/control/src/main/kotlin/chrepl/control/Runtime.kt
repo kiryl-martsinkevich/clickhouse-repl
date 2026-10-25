@@ -5,6 +5,7 @@ import chrepl.config.model.Guard
 import chrepl.config.validate.SecretReader
 import chrepl.guard.GuardGate
 import chrepl.guard.GuardLevel
+import chrepl.guard.GuardTimeoutException
 import chrepl.guard.OpsFlags
 import chrepl.guard.Reason
 import chrepl.guard.SourceGuard
@@ -95,9 +96,11 @@ class DbReadTokens(
     fun acquire(
         host: String,
         queryId: String,
+        maxWait: Duration = Duration.ofDays(365),
         onWait: (String) -> Unit,
     ) {
         var reported = false
+        val deadline = System.nanoTime() + maxWait.toNanos()
         while (true) {
             val limits = guard().concurrency
             val granted =
@@ -120,6 +123,11 @@ class DbReadTokens(
                     }
                 }
             if (granted) return
+            if (System.nanoTime() >
+                deadline
+            ) {
+                throw GuardTimeoutException(listOf(Reason("NO_READ_SLOT", host, "no read slot within $maxWait")))
+            }
             if (!reported) {
                 onWait("waiting for a read slot (limits: ${limits.global} total, ${limits.perHost} per DR host)")
                 reported = true
@@ -205,9 +213,29 @@ class Runtime(
         return CopySession(config, target, engine(version), gate(source.dc == "test", onWait), clients, locks)
     }
 
+    /**
+     * A small data read outside the chunk pipeline (continuous-mode watermark and checksum polls),
+     * admitted like any other read. Waits at most [maxWait], then throws [GuardTimeoutException].
+     */
+    fun <T> guardedRead(
+        version: String,
+        host: String,
+        queryId: String,
+        maxWait: Duration,
+        read: (Cancellation) -> T,
+    ): T {
+        val source =
+            configs
+                .get(version)
+                .sources.values
+                .single()
+        return gate(source.dc == "test", { _, _ -> }, maxWait).withPermit(host, queryId, read)
+    }
+
     private fun gate(
         unguarded: Boolean,
         onWait: (String, String) -> Unit,
+        maxWait: Duration = guardWait,
     ): ReadGate {
         val inner: ReadGate =
             if (unguarded) {
@@ -215,7 +243,7 @@ class Runtime(
             } else {
                 GuardGate(
                     guard ?: error("no Source Guard in this process"),
-                    guardWait,
+                    maxWait,
                 ) { q, reasons -> onWait(q, reasons.joinToString("; ")) }
             }
         return object : ReadGate {
@@ -224,7 +252,7 @@ class Runtime(
                 queryId: String,
                 read: (Cancellation) -> T,
             ): T {
-                tokens.acquire(host, queryId) { onWait(queryId, it) }
+                tokens.acquire(host, queryId, maxWait) { onWait(queryId, it) }
                 try {
                     return inner.withPermit(host, queryId) { cancellation ->
                         running[queryId] = cancellation

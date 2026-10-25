@@ -48,6 +48,11 @@ object SourceQueries {
             where += "${Sql.ident(cob)} IN {cobs:Array(Date)}"
             params["param_cobs"] = dateArray(selection.dates)
         }
+        chunk.dateBounds?.let { b ->
+            where += "${Sql.ident(b.column)} BETWEEN {dlo:Date} AND {dhi:Date}"
+            params["param_dlo"] = b.from.toString()
+            params["param_dhi"] = b.to.toString()
+        }
         chunk.range?.let { r ->
             val type = r.type.scalar()
             r.from?.let {
