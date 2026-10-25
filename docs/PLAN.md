@@ -308,7 +308,36 @@ Exit criteria
 - E2E: a second user replacing the same slice within 24 h must tick the confirmation.
 - Accessibility check (axe) passes on the main flows.
 
-### M7 — Hardening and production readiness (M/L)
+### M7 — Hardening and production readiness (M/L) — ✅ done (implementation); staging items open
+
+Delivered:
+- `mv_mode: base_only`: views re-created on the target and recomputed from the masked base table.
+- Target retention janitor.
+- `rekey` jobs: API and CLI.
+- Prometheus metrics (guard, queue, copies, pre-emption latency, continuous lag, active-DC violations).
+- A runtime active-DC DNS re-check that trips the failover flag; it was planned for M3 and is now done.
+- Redaction of quoted values in user-visible errors.
+- `deploy/monitoring`: Grafana dashboard and Prometheus alerts. They pass `promtool check` and `promtool test`.
+- Dockerfile (distroless, non-root).
+- Helm chart:
+  - one Deployment per role, PDBs, probes on a separate management port;
+  - deny-by-default egress NetworkPolicy, read-only root filesystem;
+  - passes `helm lint` and `kubeconform`.
+- Docs: `docs/runbook.md`, `docs/loadtest.md`, `docs/security-review.md`.
+- Tests:
+  - `MaintenanceIT` (views, retention, rekey);
+  - `LoadIT`, a scaled-down container harness (`-Pload`);
+  - unit tests for the watch and the redaction.
+
+Open, because they need people or a staging environment:
+- The load test on a prod-like staging pair, and tuning the thresholds.
+- The failover drill in staging.
+- Owner sign-off on the budget.
+- An independent pen test.
+- The runbook review by on-call.
+
+Procedures: `docs/loadtest.md`, `docs/security-review.md`.
+
 
 Scope
 - `mv_mode` variants (SPEC §5.2).

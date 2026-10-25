@@ -1,0 +1,13 @@
+{{- if not .Values.config.existingConfigMap }}
+{{- if not .Values.config.replicatorYaml }}
+{{- fail "set config.replicatorYaml or config.existingConfigMap" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "chrepl.configMapName" . }}
+  labels: {{- include "chrepl.labels" . | nindent 4 }}
+data:
+  replicator.yaml: |
+{{ .Values.config.replicatorYaml | indent 4 }}
+{{- end }}

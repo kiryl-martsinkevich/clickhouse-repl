@@ -71,6 +71,8 @@ data class Target(
     val zookeeperPathTemplate: String? = null,
     val recentCopyWarning: ConfigDuration? = null,
     val tableOverrides: TableOverrides? = null,
+    /** Drop COB partitions whose newest COB date is older than this (SPEC §11); null keeps everything. */
+    val retention: ConfigDuration? = null,
 )
 
 enum class ShardMapping { SAME_SHARDS, DISTRIBUTED, SINGLE }

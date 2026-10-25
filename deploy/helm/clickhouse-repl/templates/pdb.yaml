@@ -1,0 +1,16 @@
+{{- range $role, $r := .Values.roles }}
+{{- if gt (int $r.replicas) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "chrepl.fullname" $ }}-{{ $role }}
+  labels: {{- include "chrepl.labels" $ | nindent 4 }}
+spec:
+  minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "chrepl.selector" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $role }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,31 @@
+{{- if .Values.networkPolicy.enabled }}
+# Deny-by-default egress (SPEC §4.1 defence in depth): only DR replicas, targets, Postgres, the
+# OIDC issuer, the key store and DNS. The active DC is unreachable even if the config were wrong.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "chrepl.fullname" . }}
+  labels: {{- include "chrepl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "chrepl.selector" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: {{- toYaml .Values.networkPolicy.ingressFrom | nindent 8 }}
+      ports: [{ port: 8080, protocol: TCP }, { port: 8081, protocol: TCP }]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.networkPolicy.dns.namespace }} } }
+      ports:
+        - { port: {{ .Values.networkPolicy.dns.port }}, protocol: UDP }
+        - { port: {{ .Values.networkPolicy.dns.port }}, protocol: TCP }
+    {{- range $group, $rules := .Values.networkPolicy.egress }}
+    {{- range $rules }}
+    - to: [{ ipBlock: { cidr: {{ .cidr }} } }]  # {{ $group }}
+      ports:
+        {{- range .ports }}
+        - { port: {{ . }}, protocol: TCP }
+        {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}

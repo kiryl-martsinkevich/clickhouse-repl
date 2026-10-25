@@ -1,0 +1,73 @@
+{{- range $role, $r := .Values.roles }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chrepl.fullname" $ }}-{{ $role }}
+  labels:
+    {{- include "chrepl.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  replicas: {{ $r.replicas }}
+  selector:
+    matchLabels:
+      {{- include "chrepl.selector" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $role }}
+  template:
+    metadata:
+      labels:
+        {{- include "chrepl.selector" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ $role }}
+      annotations:
+        checksum/config: {{ $.Values.config.replicatorYaml | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {{- toYaml $.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ $role }}
+          image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          securityContext: {{- toYaml $.Values.securityContext | nindent 12 }}
+          env:
+            - { name: CHREPL_ROLES, value: {{ $role | quote }} }
+            - { name: CHREPL_CONFIG, value: /etc/chrepl/replicator.yaml }
+            {{- if eq $role "worker" }}
+            - { name: CHREPL_WORKER_THREADS, value: {{ $r.threads | quote }} }
+            {{- end }}
+            - { name: SPRING_DATASOURCE_URL, value: {{ $.Values.postgres.url | quote }} }
+            - { name: SPRING_DATASOURCE_USERNAME, value: {{ $.Values.postgres.username | quote }} }
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ $.Values.postgres.passwordSecret.name }}, key: {{ $.Values.postgres.passwordSecret.key }} } }
+            - { name: SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI, value: {{ $.Values.oidc.issuerUri | quote }} }
+            {{- if $.Values.oidc.audiences }}
+            - { name: SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_AUDIENCES, value: {{ join "," $.Values.oidc.audiences | quote }} }
+            {{- end }}
+            - { name: CHREPL_PORTAL_ISSUER, value: {{ $.Values.oidc.issuerUri | quote }} }
+            - { name: CHREPL_PORTAL_CLIENT_ID, value: {{ $.Values.oidc.portalClientId | quote }} }
+            - { name: MANAGEMENT_SERVER_PORT, value: "8081" }
+            - { name: SPRINGDOC_API_DOCS_ENABLED, value: {{ $.Values.apiDocs.enabled | quote }} }
+            - { name: SPRINGDOC_SWAGGER_UI_ENABLED, value: {{ $.Values.apiDocs.enabled | quote }} }
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: management, containerPort: 8081 }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: management }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: management }
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources: {{- toYaml $r.resources | nindent 12 }}
+          volumeMounts:
+            - { name: config, mountPath: /etc/chrepl, readOnly: true }
+            - { name: secrets, mountPath: /var/run/secrets/chrepl, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap: { name: {{ include "chrepl.configMapName" $ }} }
+        - name: secrets
+          secret: { secretName: {{ $.Values.secrets.existingSecret }}, defaultMode: 0400 }
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+{{- end }}

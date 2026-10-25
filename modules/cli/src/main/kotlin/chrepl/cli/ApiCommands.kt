@@ -318,6 +318,21 @@ class CancelCommand : ApiCommand("cancel") {
     }
 }
 
+class RekeyCommand : ApiCommand("rekey") {
+    override fun help(context: Context) =
+        "After a masking key version change: re-copy everything on a target that was masked with an older key (admin)."
+
+    private val target by option("--target", help = "target environment, e.g. qa1").required()
+
+    override fun call(client: ApiClient) {
+        val result = client.post("/admin/rekey", mapOf("target" to target))
+        print(result) {
+            val jobs = result.path("jobs").map { it.asText() }
+            if (jobs.isEmpty()) "nothing on $target needs a rekey" else "rekey jobs: ${jobs.joinToString(" ")}"
+        }
+    }
+}
+
 internal fun statusLine(job: JsonNode): String {
     val p = job.path("progress")
     val wait =

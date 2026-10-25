@@ -429,6 +429,12 @@ Details settled in M2:
    - `targets_only`: copy MV target tables directly; MVs on the target are created but their source tables are not copied.
    - `none`: MVs are not created on the target.
 
+   - Implementation (M7):
+     - `base_only` re-creates, on the target, every view that reads from the copied table, together with its `TO` table.
+     - Partition replacement does not fire views, so after each copy the view targets are truncated and recomputed on the target from the (masked) base table, with the view's own `SELECT`. View targets are never read from DR, so derived data stays masked.
+     - Views with implicit inner storage (no `TO`) are skipped.
+     - `targets_only` and `none` copy only the listed tables.
+
 ### 5.3 Planning chunks (metadata only, per DR shard)
 
 For each of the 3 DR shard replicas:
@@ -531,6 +537,7 @@ for reviewer attention. It is advisory only.
   affected tables). Mixed versions in one target table are prevented: the target records the
   key version per table in `repl_meta.tables`, and writes with a different version are refused
   except by `rekey`.
+  Implemented in M7 as `POST /api/v1/admin/rekey` and `clickhouse-repl rekey --target …` (admin). For each table on the target masked with another realm or key version, a rekey job re-copies the COB dates it holds (or the whole table) with the current key.
 - Moving from `static` to `fortanix` **without** rotating keeps masked values identical, as
   long as the same key material is imported into DSM (BYOK) and the version is unchanged.
 
@@ -810,7 +817,15 @@ A complete, annotated example is in [`docs/examples/replicator.yaml`](examples/r
 - **Alerts**: DR_ACTIVE detected; guard UNKNOWN > 5 min; circuit breaker open; continuous lag > SLO; chunk failure rate; any L1 limit hit (planner bug); orphan staging tables; any active-DC violation.
 - **Traces**: one trace per chunk (plan → token wait → read → mask → insert → replace).
 - **Runbook** (PLAN M7): pausing, draining, **DC failover/failback steps** (set/clear failover flag, swap config), rekey, adding a table, handling drift, recovering a stuck job.
-- **Retention on targets**: optional per-target TTL or janitor to drop COB partitions older than N days.
+- **Retention on targets**: optional per-target TTL or janitor to drop COB partitions older than N days. Implemented as `targets.<name>.retention`: the scheduler leader drops, hourly, COB partitions whose newest COB date is older than the retention, after checking the target's environment marker and under the partition lock (M7).
+- **Metrics implemented (M7).** On `/actuator/prometheus`:
+  - guard: `chrepl_guard_state{host}`, `chrepl_guard_cluster_state`, `chrepl_guard_block_reasons{reason}`, `chrepl_dr_replica_delay_seconds{host}`, `chrepl_dr_replication_queue{host}`;
+  - work: `chrepl_queue_depth{queue}`, `chrepl_rows_copied_total`, `chrepl_chunk_duration_seconds`, `chrepl_preemptions_total`, `chrepl_preemption_latency_seconds`, `chrepl_chunk_failures_total`, `chrepl_jobs_finished_total{kind,state}`;
+  - continuous: `chrepl_continuous_lag_seconds`, `chrepl_continuous_alerting`;
+  - safety and housekeeping: `chrepl_active_dc_violations_total`, `chrepl_retention_dropped_partitions_total`.
+
+  Dashboard and alert rules: `deploy/monitoring/`. Traces are not implemented.
+- **Runtime active-DC re-check (M7).** Every process re-resolves all configured hosts every minute. A match with the active-DC deny-list sets the sticky failover flag.
 
 ---
 

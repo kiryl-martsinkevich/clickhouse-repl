@@ -39,6 +39,32 @@ jobs:
           name: test-reports
           path: modules/*/build/reports/tests/
 
+  deploy-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      - name: Helm lint and render
+        run: |
+          helm lint deploy/helm/clickhouse-repl --set config.replicatorYaml="version: 1"
+          helm template t deploy/helm/clickhouse-repl --set config.replicatorYaml="version: 1" > rendered.yaml
+
+      - name: Validate Kubernetes manifests
+        run: |
+          curl -sSfL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          ./kubeconform -strict -summary -ignore-missing-schemas rendered.yaml
+
+      - name: Check and test Prometheus rules
+        working-directory: deploy/monitoring
+        run: |
+          curl -sSfL https://github.com/prometheus/prometheus/releases/download/v3.7.2/prometheus-3.7.2.linux-amd64.tar.gz | tar xz --strip-components=1 prometheus-3.7.2.linux-amd64/promtool
+          ./promtool check rules alerts.yaml
+          ./promtool test rules alerts.test.yaml
+
   integration:
     runs-on: ubuntu-latest
     needs: build

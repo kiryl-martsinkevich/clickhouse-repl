@@ -86,6 +86,14 @@ data class ReloadResult(
     val version: String,
 )
 
+data class RekeyBody(
+    val target: String,
+)
+
+data class RekeyResult(
+    val jobs: List<String>,
+)
+
 /** Registers the API only in processes with the `api` role. */
 class ApiRoleCondition : Condition {
     override fun matches(
@@ -219,6 +227,14 @@ class ApiController(
     fun resume(
         @AuthenticationPrincipal jwt: Jwt,
     ) = ops.resume(principals.of(jwt))
+
+    /** Re-copies everything on a target masked with an older key version (SPEC §6.2). Admin. */
+    @PostMapping("/admin/rekey")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    fun rekey(
+        @AuthenticationPrincipal jwt: Jwt,
+        @RequestBody body: RekeyBody,
+    ): RekeyResult = RekeyResult(jobs.rekey(principals.of(jwt), body.target))
 
     @PostMapping("/admin/config/reload")
     fun reload(

@@ -1,0 +1,85 @@
+# Values for the clickhouse-repl chart (PLAN M7). See docs/runbook.md for operations.
+image:
+  repository: registry.example.internal/clickhouse-repl
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# One Deployment per process role (SPEC §3). The scheduler elects a leader in Postgres, so 2
+# replicas give a warm standby; workers scale horizontally; read limits are cluster-wide.
+roles:
+  api:
+    replicas: 2
+    resources: { requests: { cpu: 250m, memory: 768Mi }, limits: { memory: 1536Mi } }
+  worker:
+    replicas: 3
+    threads: 4
+    resources: { requests: { cpu: "2", memory: 2Gi }, limits: { memory: 4Gi } }
+  scheduler:
+    replicas: 2
+    resources: { requests: { cpu: 100m, memory: 512Mi }, limits: { memory: 1Gi } }
+
+# The replicator configuration (docs/examples/replicator.yaml). Either inline YAML here or an
+# existing ConfigMap with a replicator.yaml key (and dictionaries as further keys).
+config:
+  existingConfigMap: ""
+  replicatorYaml: ""
+
+# Secrets referenced by the config as ${file:/var/run/secrets/chrepl/<name>}: DR reader/guard
+# passwords, target writer passwords, the masking key (or the Fortanix DSM API key).
+secrets:
+  existingSecret: chrepl-secrets
+
+postgres:
+  url: jdbc:postgresql://postgres.chrepl.svc:5432/chrepl
+  username: chrepl
+  passwordSecret: { name: chrepl-postgres, key: password }
+
+oidc:
+  # The API validates bearer tokens from this issuer; the portal signs users in with it.
+  issuerUri: https://sso.example.internal/realms/corp
+  audiences: []
+  portalClientId: chrepl-portal
+
+# OpenAPI JSON and Swagger UI; off in production (security review, docs/security-review.md).
+apiDocs:
+  enabled: false
+
+ingress:
+  enabled: true
+  className: nginx
+  host: chrepl.example.internal
+  tlsSecret: chrepl-tls
+
+podDisruptionBudget:
+  minAvailable: 1
+
+# Egress is denied except to these destinations (PLAN M7): DR replicas, targets, Postgres, the
+# OIDC issuer, the key store, and cluster DNS. The active DC must never appear here.
+networkPolicy:
+  enabled: true
+  dns: { namespace: kube-system, port: 53 }
+  egress:
+    drReplicas: [{ cidr: 10.20.0.0/24, ports: [8443] }]
+    targets: [{ cidr: 10.30.0.0/24, ports: [8443] }]
+    postgres: [{ cidr: 10.40.0.10/32, ports: [5432] }]
+    oidc: [{ cidr: 10.50.0.20/32, ports: [443] }]
+    keyStore: []
+  # Pods allowed to reach the API (ingress controller, Prometheus).
+  ingressFrom:
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+  seccompProfile: { type: RuntimeDefault }
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: [ALL] }

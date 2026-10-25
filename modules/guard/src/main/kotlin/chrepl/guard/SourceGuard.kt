@@ -89,6 +89,13 @@ data class GuardStatus(
     val activeReads: Int,
     /** Largest DR replica delay in the latest successful samples: how far DR trails the active DC. */
     val replicaDelaySeconds: Long? = null,
+    /** Replication signals of each host's latest successful sample (metrics). */
+    val hostSignals: Map<String, HostSignals> = emptyMap(),
+)
+
+data class HostSignals(
+    val replicaDelaySeconds: Long,
+    val queueSize: Long,
 )
 
 /**
@@ -362,11 +369,20 @@ class SourceGuard(
         }
     }
 
-    fun release(permit: Permit) =
+    /** Called with the time from pre-emption to the read's end (the latency SPEC §1.3 budgets). */
+    @Volatile var onPreemptionEnded: (Duration) -> Unit = {}
+
+    fun release(permit: Permit) {
         lock.withLock {
             permits -= permit
             changed.signalAll()
         }
+        permit.preemptedAt?.let { at ->
+            val latency = Duration.between(at, Instant.now())
+            log.info("read {} on {} ended {} ms after pre-emption", permit.queryId, permit.host, latency.toMillis())
+            runCatching { onPreemptionEnded(latency) }
+        }
+    }
 
     /** Cancels running reads on hosts that are no longer admissible (SPEC §4.5). */
     private fun preemptIfNeeded(now: Instant) {
@@ -404,7 +420,12 @@ class SourceGuard(
             val level = clusterLevel()
             val reasons = clusterReasons.ifEmpty { states.values.flatMap { it.reasons } }
             val delay = states.values.mapNotNull { s -> s.last?.takeIf { it.ok }?.replicaDelaySeconds }.maxOrNull()
-            GuardStatus(level, states.mapValues { it.value.level }, reasons, permits.size, delay)
+            val signals =
+                states
+                    .mapNotNull { (host, s) ->
+                        s.last?.takeIf { it.ok }?.let { host to HostSignals(it.replicaDelaySeconds, it.queueSize) }
+                    }.toMap()
+            GuardStatus(level, states.mapValues { it.value.level }, reasons, permits.size, delay, signals)
         }
 
     override fun close() {
@@ -413,6 +434,8 @@ class SourceGuard(
         pool.shutdownNow()
     }
 }
+
+private val log = org.slf4j.LoggerFactory.getLogger(SourceGuard::class.java)
 
 /** The pre-emption backstop (SPEC §4.5). */
 fun interface Killer {

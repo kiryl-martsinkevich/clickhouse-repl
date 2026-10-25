@@ -9,11 +9,12 @@ environments (QA, UAT, perf), with consistent masking of sensitive columns.
 - **Ad-hoc mode**: QA users request a table or dataset for a COB date from a web portal, and the job runs in the background.
 - **Production first**: reads come only from the passive DR datacentre — the active DC is never contacted. A Source Guard admits reads only while DR replication is healthy, pre-empts them when it falls behind, stops immediately if DR becomes active, and fails closed.
 
-Status: M0 (configuration), M1 (masking engine), M2 (batch transfer), M3 (Source Guard) and M4 (control plane: jobs, workers, REST API, CLI client) M5 (continuous mode) and M6 (portal) implemented; see the plan for what comes next.
+Status: M0 (configuration), M1 (masking engine), M2 (batch transfer), M3 (Source Guard) and M4 (control plane: jobs, workers, REST API, CLI client) M5 (continuous mode), M6 (portal) and M7 (hardening: views, retention, rekey, metrics, Helm) implemented; see the plan for what comes next.
 
 Docs:
 
 - [Design specification](docs/SPEC.md)
+- [Runbook](docs/runbook.md) · [Load test](docs/loadtest.md) · [Security review](docs/security-review.md)
 - [Implementation plan](docs/PLAN.md)
 - [Example configuration](docs/examples/replicator.yaml)
 
@@ -62,6 +63,16 @@ cluster and runs.
 Settings: `chrepl.portal.issuer` (the OIDC issuer the browser signs in with), `chrepl.portal.client-id`
 (a public client; default `chrepl-portal`), `chrepl.portal.scope`. The browser E2E tests run with
 `./gradlew :it:test -Pit -Pe2e --tests '*PortalE2EIT*'` (needs Node.js 22 and Chromium).
+
+## Deploy
+
+- `Dockerfile`: distroless runtime image. Build the jar first with `./gradlew :app:bootJar`.
+- `deploy/helm/clickhouse-repl`:
+  - one Deployment per role (`api`, `worker`, `scheduler`), with PodDisruptionBudgets;
+  - a deny-by-default egress NetworkPolicy: DR replicas, targets, Postgres, OIDC and the key store only;
+  - actuator on a management port that the Ingress does not expose.
+- `deploy/monitoring`: Grafana dashboard and Prometheus alert rules (`promtool test rules alerts.test.yaml`).
+- `deploy/dr-ddl.sql` and `deploy/dr-users.d/`: DR users, profiles, quotas and workload scheduling. `deploy/target-ddl.sql`: target marker and writer.
 
 ## Request copies from the command line
 

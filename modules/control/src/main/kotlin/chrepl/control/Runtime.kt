@@ -194,7 +194,7 @@ class Runtime(
     private val engines = ConcurrentHashMap<String, MaskingEngine>()
     private val running = ConcurrentHashMap<String, Cancellation>()
     private val tokens = DbReadTokens(db, { configs.current.guard }, workerId)
-    private val locks = PgPartitionLocks(db)
+    val locks = PgPartitionLocks(db)
 
     fun engine(version: String): MaskingEngine =
         engines.computeIfAbsent(version) {

@@ -1,0 +1,20 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "chrepl.fullname" . }}
+  labels: {{- include "chrepl.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    - hosts: [{{ .Values.ingress.host | quote }}]
+      secretName: {{ .Values.ingress.tlsSecret }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # The portal and the API. Actuator (health, metrics) listens on a separate port that is not exposed here.
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: {{ include "chrepl.fullname" . }}, port: { name: http } } }
+{{- end }}

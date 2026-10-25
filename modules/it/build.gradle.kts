@@ -28,6 +28,11 @@ tasks.test {
     systemProperty("chrepl.portalDir", rootProject.file("modules/portal").absolutePath)
     // The portal E2E test also needs Node.js and Chromium: -Pe2e.
     if (project.hasProperty("e2e")) systemProperty("chrepl.e2e", "true")
+    // The scaled-down load test (PLAN M7): -Pload [-Pchrepl.load.seconds=60] [-Pchrepl.load.budget=5].
+    if (project.hasProperty("load")) systemProperty("chrepl.load", "true")
+    listOf("chrepl.load.seconds", "chrepl.load.budget").forEach { key ->
+        (project.findProperty(key) as String?)?.let { systemProperty(key, it) }
+    }
     (project.findProperty("screenshots") as String?)?.let { systemProperty("chrepl.screenshots", rootProject.file(it).absolutePath) }
     (project.findProperty("chrepl.it.image") as String?)?.let { systemProperty("chrepl.it.image", it) }
     maxParallelForks = 1

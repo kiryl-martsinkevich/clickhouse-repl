@@ -98,6 +98,7 @@ fun cli(): CliktCommand =
         StatusCommand(),
         JobsCommand(),
         CancelCommand(),
+        RekeyCommand(),
     )
 
 fun main(args: Array<String>) = cli().main(args)

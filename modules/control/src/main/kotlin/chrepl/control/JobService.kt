@@ -1,10 +1,12 @@
 package chrepl.control
 
+import chrepl.clickhouse.Sql
 import chrepl.config.model.Role
 import chrepl.guard.GuardLevel
 import chrepl.transfer.ChunkPlanner
 import chrepl.transfer.CopySession
 import chrepl.transfer.SchemaInspector
+import chrepl.transfer.TargetMeta
 import java.sql.ResultSet
 import java.time.Clock
 import java.time.Duration
@@ -231,6 +233,7 @@ class JobService(
         partitions: List<String>?,
         coalesceKey: String,
         configVersion: String = configs.currentVersion,
+        rekey: Boolean = false,
     ): String? =
         db.tx {
             exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", "submit:$coalesceKey")
@@ -243,7 +246,7 @@ class JobService(
             val id = chrepl.transfer.CopyJob.newJobId()
             update(
                 "INSERT INTO jobs (id, kind, queue, requester, target, tables, cob_dates, partitions, state, config_version, " +
-                    "coalesce_key) VALUES (?, ?, 'continuous', ?, ?, ?, ?, ?, 'PENDING', ?, ?)",
+                    "coalesce_key, rekey) VALUES (?, ?, 'continuous', ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)",
                 id,
                 kind,
                 SCHEDULER,
@@ -253,11 +256,71 @@ class JobService(
                 partitions?.let { StringArray(it) },
                 configVersion,
                 coalesceKey,
+                rekey,
             )
             update("INSERT INTO job_requesters (job_id, requester) VALUES (?, ?)", id, SCHEDULER)
             audit(SCHEDULER, "job.submit", id, mapOf("kind" to kind, "tables" to tables, "partitions" to partitions))
             id
         }
+
+    /**
+     * Rekey (SPEC §6.2): after the masking key version changed, re-copies every table on [target]
+     * that was masked with another realm or key version: the same COB dates it holds now, or the
+     * whole table for full copies. Admin only. Returns the job ids.
+     */
+    fun rekey(
+        principal: Principal,
+        target: String,
+    ): List<String> {
+        requireRole(principal, Role.ADMIN)
+        val version = configs.currentVersion
+        val config = configs.get(version)
+        if (target !in config.targets) throw NotFoundException("unknown target '$target'")
+        val session = runtime.session(version, target) { _, _ -> }
+        val current = session.realm to session.keyVersion
+        val ids = mutableListOf<String>()
+        for (spec in config.tables) {
+            val (database, table) = spec.source.split('.', limit = 2)
+            val stale =
+                session.targetClients.any { client ->
+                    TargetMeta.keyVersionOf(client, database, table)?.let { it != current }
+                        ?: false
+                }
+            if (!stale) continue
+            val cob = spec.cobColumn
+            val dates =
+                if (cob == null || spec.fullCopy) {
+                    emptyList()
+                } else {
+                    session.targetClients
+                        .flatMap { client ->
+                            client
+                                .queryJson("SELECT DISTINCT toString(${Sql.ident(cob)}) AS d FROM ${Sql.table(spec.source)}")
+                                .map { LocalDate.parse(it["d"].textValue()) }
+                        }.distinct()
+                        .sorted()
+                }
+            if (cob != null && !spec.fullCopy && dates.isEmpty()) continue
+            submitSystem("rekey", target, listOf(spec.source), dates, null, "rekey|$target|${spec.source}", version, rekey = true)?.let {
+                ids +=
+                    it
+            }
+        }
+        db.tx {
+            audit(
+                principal.user,
+                "rekey",
+                null,
+                mapOf(
+                    "target" to target,
+                    "jobs" to ids,
+                    "realm" to current.first,
+                    "keyVersion" to current.second,
+                ),
+            )
+        }
+        return ids
+    }
 
     // ------------------------------------------------------------------------------------- reading
 

@@ -1,0 +1,91 @@
+# Prometheus alert rules for clickhouse-repl (SPEC §11). Validate with: promtool check rules alerts.yaml
+groups:
+  - name: clickhouse-repl
+    rules:
+      - alert: ChreplActiveDcViolation
+        expr: sum(increase(chrepl_active_dc_violations_total[10m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A configured host resolved into the active (production) DC
+          description: >-
+            The runtime re-check found a source or target host inside the active-DC deny-list. All
+            replication reads were stopped (failover flag). Fix DNS or the configuration, then clear
+            the flag (docs/runbook.md, "Active-DC violation").
+
+      - alert: ChreplDrActive
+        expr: max(chrepl_guard_cluster_state) == 4
+        labels:
+          severity: critical
+        annotations:
+          summary: DR may be active - replication is stopped
+          description: >-
+            Foreign activity on DR or the operator failover flag. No reads run until an operator
+            clears the flag (docs/runbook.md, "DC failover").
+
+      - alert: ChreplGuardUnknown
+        expr: max(chrepl_guard_cluster_state) == 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: The Source Guard cannot assess DR
+          description: A DR host is unreachable or its signals are stale; reads are blocked (fail closed).
+
+      - alert: ChreplCircuitBreakerOpen
+        expr: max(chrepl_guard_block_reasons{reason="CIRCUIT_OPEN"}) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Too many pre-emptions - the guard's circuit breaker is open
+          description: Reads are paused for the breaker's open period. Check DR load and the guard thresholds.
+
+      - alert: ChreplSlowPreemption
+        expr: histogram_quantile(0.99, sum by (le) (rate(chrepl_preemption_latency_seconds_bucket[30m]))) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Pre-empted reads take too long to stop
+          description: p99 time from pre-emption to the end of a read is above 10 s (budget poll_interval + 5 s, SPEC §1.3).
+
+      - alert: ChreplContinuousLag
+        expr: max by (name, table, target) (chrepl_continuous_alerting) == 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "Continuous job {{ $labels.name }} ({{ $labels.table }} -> {{ $labels.target }}) is behind its lag SLO"
+          description: Lag has exceeded lag_slo for longer than lag_alert_after (SPEC §8.4).
+
+      - alert: ChreplChunkFailures
+        expr: sum by (table) (increase(chrepl_chunk_failures_total[30m])) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: "Copies of {{ $labels.table }} keep failing"
+          description: More than 5 chunk failures in 30 minutes. Check target health and the job reasons.
+
+      - alert: ChreplJobsFailing
+        expr: sum(increase(chrepl_jobs_finished_total{state=~"FAILED|BLOCKED"}[1h])) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: Several copy jobs failed or were blocked in the last hour
+          description: BLOCKED usually means schema drift or an unclassified column (config change needed).
+
+      - alert: ChreplQueueBacklog
+        expr: sum(chrepl_queue_depth) > 50
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: More than 50 active jobs for 30 minutes
+          description: Usually DR has been busy for a long time; check the guard's reasons.
+
+      - alert: ChreplDown
+        expr: up{job="clickhouse-repl"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A clickhouse-repl process is not being scraped

@@ -288,6 +288,21 @@ class ApiIT {
             )
         assertEquals(202, confirmed.status, confirmed.json.toString())
         awaitState(confirmed.json.path("id").asText(), "SUCCEEDED")
+
+        // Prometheus metrics (SPEC §11): the names the dashboard and alert rules in deploy/monitoring use.
+        val metrics =
+            http
+                .send(HttpRequest.newBuilder(URI.create("$url/actuator/prometheus")).GET().build(), HttpResponse.BodyHandlers.ofString())
+                .body()
+        for (name in listOf(
+            "chrepl_rows_copied_total",
+            "chrepl_chunk_duration_seconds_count",
+            "chrepl_jobs_finished_total",
+            "chrepl_queue_depth",
+        )) {
+            assertContains(metrics, name)
+        }
+        assertContains(metrics, "chrepl_jobs_finished_total{kind=\"adhoc\",state=\"SUCCEEDED\"}")
     }
 
     @Test

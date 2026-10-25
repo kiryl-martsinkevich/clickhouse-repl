@@ -82,6 +82,9 @@ internal fun RuleContext.checkTargets() {
                 error(Code.TARGET_MARKER, "$path.environment_marker", "environment marker '$marker' must equal the target name '$name'")
             }
         }
+        target.retention?.let {
+            if (it.value < java.time.Duration.ofDays(1)) error(Code.INVALID_VALUE, "$path.retention", "retention must be at least 1d")
+        }
         target.recentCopyWarning?.let {
             if (it.value.isZero) error(Code.INVALID_VALUE, "$path.recent_copy_warning", "must be positive")
         }

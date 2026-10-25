@@ -95,7 +95,7 @@ class Worker(
                     "UPDATE jobs SET state = 'PLANNING', lease_owner = ?, lease_until = now() + make_interval(secs => ?), " +
                         "updated_at = now(), started_at = coalesce(started_at, now()) " +
                         "WHERE id = (SELECT id FROM jobs WHERE state = 'PENDING' ORDER BY queue = 'continuous' DESC, created_at " +
-                        "FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id, target, tables, cob_dates, partitions, config_version",
+                        "FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id, target, tables, cob_dates, partitions, rekey, config_version",
                     id,
                     leaseSeconds,
                 ) {
@@ -105,13 +105,14 @@ class Worker(
                         it.strings("tables"),
                         it.dates("cob_dates"),
                         it.stringsOrNull("partitions"),
+                        it.getBoolean("rekey"),
                         it.getString("config_version"),
                     )
                 }
             } ?: return true.let { false }
         try {
             val session = runtime.session(job.configVersion, job.target) { _, _ -> }
-            val prepared = job.tables.map { session.prepare(it, job.cobDates, job.partitions) }
+            val prepared = job.tables.map { session.prepare(it, job.cobDates, job.partitions, allowRekey = job.rekey) }
             db.tx {
                 var seq = 0
                 for (table in prepared) {
@@ -173,6 +174,7 @@ class Worker(
         val tables: List<String>,
         val cobDates: List<LocalDate>,
         val partitions: List<String>?,
+        val rekey: Boolean,
         val configVersion: String,
     )
 
@@ -219,7 +221,9 @@ class Worker(
                     db.tx { update("UPDATE chunks SET wait_reason = ?, updated_at = now() WHERE id = ?", reason, chunk.id) }
                 }
             val context = session.context(chunk.table)
+            val started = System.nanoTime()
             val rows = session.copyChunk(context, chunk.targetIndex, parseChunk(chunk.chunkKey, chunk.spec), chunk.staging, queryId)
+            ControlMetrics.chunkDone(chunk.table, chunk.target, rows, Duration.ofNanos(System.nanoTime() - started))
             db.tx {
                 update(
                     "UPDATE chunks SET state = 'DONE', rows_copied = ?, wait_reason = NULL, lease_owner = NULL, " +
@@ -235,6 +239,7 @@ class Worker(
                 )
             }
         } catch (e: PreemptedException) {
+            ControlMetrics.chunkPreempted(chunk.table)
             db.tx {
                 update(
                     "UPDATE chunks SET state = 'PREEMPTED', preemptions = preemptions + 1, wait_reason = ?, lease_owner = NULL, " +
@@ -249,6 +254,7 @@ class Worker(
             if (e is CancelledException || jobState(chunk.jobId) == JobState.CANCELLING) {
                 db.tx { update("UPDATE chunks SET state = 'CANCELLED', lease_owner = NULL, updated_at = now() WHERE id = ?", chunk.id) }
             } else {
+                ControlMetrics.chunkFailed(chunk.table)
                 failChunk(chunk, e)
             }
         } finally {
@@ -608,6 +614,14 @@ class Worker(
         state: JobState,
         reason: String?,
     ) {
+        val kind =
+            db.tx {
+                one(
+                    "SELECT kind FROM jobs WHERE id = ? AND state NOT IN ('SUCCEEDED', 'FAILED', 'BLOCKED', 'CANCELLED')",
+                    jobId,
+                ) { it.getString(1) }
+            }
+        kind?.let { ControlMetrics.jobFinished(it, state) }
         db.tx {
             update(
                 "UPDATE jobs SET state = ?, reason = ?, lease_owner = NULL, lease_until = NULL, updated_at = now(), finished_at = now() " +
@@ -643,7 +657,14 @@ class Worker(
 
     companion object {
         /** Error text for jobs and chunks: the exception message only (masking and client errors never carry data values). */
-        fun describe(e: Throwable): String = "${e::class.simpleName}: ${e.message?.take(500) ?: ""}"
+        private val QUOTED = Regex("""'(?:[^'\\]|\\.)*'""")
+
+        /**
+         * A failure as shown to users (job reason, chunk error). ClickHouse errors can quote values
+         * (e.g. a value that failed to parse); quoted literals are redacted so that no source data
+         * reaches the API, the portal or the audit log.
+         */
+        fun describe(e: Throwable): String = "${e::class.simpleName}: ${e.message?.replace(QUOTED, "'…'")?.take(500) ?: ""}"
 
         fun chunkJson(chunk: Chunk): Map<String, Any?> =
             mapOf(

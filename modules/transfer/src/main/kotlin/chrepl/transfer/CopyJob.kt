@@ -4,6 +4,7 @@ import chrepl.clickhouse.ClickHouseClient
 import chrepl.clickhouse.Endpoint
 import chrepl.clickhouse.Sql
 import chrepl.config.model.HostPort
+import chrepl.config.model.MvMode
 import chrepl.config.model.ReplicatorConfig
 import chrepl.config.model.SecretRef
 import chrepl.config.model.ShardMapping
@@ -151,6 +152,8 @@ class CopySession(
         tableName: String,
         cobDates: List<LocalDate>,
         partitions: List<String>? = null,
+        /** A rekey job may overwrite a table masked with another key version (SPEC §6.2). */
+        allowRekey: Boolean = false,
     ): PreparedTable {
         val spec = spec(tableName)
         val selection = selection(spec, cobDates, partitions)
@@ -171,12 +174,17 @@ class CopySession(
         engine.compile(spec, sourceInfo.columns) // throws MaskingConfigException listing every problem
 
         targetClients.forEach { TargetMeta.checkMarker(it, targetName) }
-        targetClients.forEach { TargetMeta.checkKeyVersion(it, database, table, engine.realm, engine.keyVersion) }
+        targetClients.forEach { TargetMeta.checkKeyVersion(it, database, table, engine.realm, engine.keyVersion, allowRekey) }
         val targetInfos =
             targetClients.map { client ->
                 TargetMeta.ensureTables(client)
                 SchemaSync.ensure(client, sourceInfo, target)
             }
+        if (spec.mvMode == MvMode.BASE_ONLY) {
+            val sourceClient = sourceClients.values.first()
+            val views = MaterializedViews.dependents(sourceClient, database, table)
+            if (views.isNotEmpty()) targetClients.forEach { MaterializedViews.ensureOnTarget(sourceClient, it, target, views) }
+        }
 
         val plan = ChunkPlanner(spec.chunk?.maxBytes?.bytes ?: DEFAULT_CHUNK_BYTES).plan(spec, sourceInfo, selection, sourceClients)
         spec.maxFullCopyBytes?.let { cap ->
@@ -259,6 +267,12 @@ class CopySession(
     fun finishTable(context: TableContext) =
         targetClients.forEach {
             TargetMeta.recordKeyVersion(it, context.database, context.table, engine.realm, engine.keyVersion)
+            // Views do not fire on partition replacement: rebuild their targets from the copied base table.
+            if (context.spec.mvMode == MvMode.BASE_ONLY) {
+                locks.withLock("${it.endpoint}/${context.database}.${context.table}/views") {
+                    MaterializedViews.recompute(it, context.database, context.table)
+                }
+            }
         }
 
     val realm: String get() = engine.realm

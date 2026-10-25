@@ -5,6 +5,8 @@ plugins {
 
 dependencies {
     api(project(":transfer"))
+    implementation(platform(libs.spring.boot.bom))
+    implementation(libs.slf4j.api)
 
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)

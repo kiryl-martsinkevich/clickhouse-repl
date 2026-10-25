@@ -79,6 +79,21 @@ object TargetMeta {
         }
     }
 
+    /** The realm and key version a target table was masked with, or null when unknown. */
+    fun keyVersionOf(
+        client: ClickHouseClient,
+        database: String,
+        table: String,
+    ): Pair<String, Int>? {
+        if (client.queryScalar("EXISTS TABLE repl_meta.tables") != "1") return null
+        return client
+            .queryJson(
+                "SELECT realm, key_version FROM repl_meta.tables FINAL WHERE database = {db:String} AND table = {t:String}",
+                mapOf("param_db" to database, "param_t" to table),
+            ).singleOrNull()
+            ?.let { it["realm"].textValue() to it["key_version"].asInt() }
+    }
+
     fun recordKeyVersion(
         client: ClickHouseClient,
         database: String,

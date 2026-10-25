@@ -23,6 +23,8 @@ data class SchedulerSettings(
     val tick: Duration = Duration.ofSeconds(1),
     /** How long a watermark or checksum poll waits for the guard before the poll is skipped. */
     val readWait: Duration = Duration.ofSeconds(10),
+    /** How often the leader runs the target retention janitor. */
+    val retentionEvery: Duration = Duration.ofHours(1),
 )
 
 /**
@@ -102,6 +104,8 @@ class Scheduler(
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
     private var leaderConnection: Connection? = null
+    private val janitor = RetentionJanitor(db, configs, runtime, clock)
+    private var lastRetention: Instant? = null
 
     val isLeader: Boolean get() = leaderConnection != null
 
@@ -110,7 +114,12 @@ class Scheduler(
         thread =
             Thread({
                 while (running.get()) {
-                    runCatching { if (lead()) tick() }.onFailure { log.warn("scheduler tick failed", it) }
+                    runCatching {
+                        if (lead()) {
+                            tick()
+                            retention()
+                        }
+                    }.onFailure { log.warn("scheduler tick failed", it) }
                     runCatching { Thread.sleep(settings.tick.toMillis()) }
                 }
             }, "scheduler").apply {
@@ -141,6 +150,13 @@ class Scheduler(
             conn.close()
         }
         return acquired
+    }
+
+    private fun retention() {
+        val now = clock.instant()
+        if (lastRetention?.plus(settings.retentionEvery)?.isAfter(now) == true) return
+        lastRetention = now
+        runCatching { janitor.run() }.onFailure { log.warn("retention janitor failed", it) }
     }
 
     /** One scheduling round over every stream. Exposed for deterministic tests. */
