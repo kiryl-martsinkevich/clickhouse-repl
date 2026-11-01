@@ -2,7 +2,7 @@
 #   ./gradlew :app:bootJar && docker build -t clickhouse-repl:dev .
 # Chainguard JRE: minimal (no shell, no package manager), non-root (uid 65532) and, when last
 # scanned (OSV-Scanner, see SECURITY.md), free of known CVEs. Pinned by digest; bump it to pick up fixes.
-FROM cgr.dev/chainguard/jre:latest@sha256:4a28de032c54fde58541376fc758b1449ca822e89b49847dbcb8887fb8bacf17
+FROM cgr.dev/chainguard/jre:latest@sha256:e91c6abce7e784a90111f265e2556e361417905c1c229877bae1a815b8dad5af
 WORKDIR /app
 COPY modules/app/build/libs/clickhouse-repl-app.jar /app/app.jar
 USER 65532:65532
