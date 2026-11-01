@@ -9,7 +9,7 @@ kotest = "6.2.6"
 coroutines = "1.11.0"
 jmh = "1.37"
 springBoot = "4.1.2"
-springdoc = "3.1.1"
+springdoc = "3.2.0"
 jmhPlugin = "0.7.3"
 
 [libraries]
