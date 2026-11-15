@@ -3,7 +3,7 @@
 buildscript {
     dependencies {
         constraints {
-            classpath("org.apache.commons:commons-lang3:3.21.0")
+            classpath("org.apache.commons:commons-lang3:3.22.0")
         }
     }
 }
