@@ -3,10 +3,10 @@
 # This file is expected to be part of source control.
 ch.qos.logback:logback-classic:1.5.38=ktlint
 ch.qos.logback:logback-core:1.5.38=ktlint
-com.fasterxml.jackson.core:jackson-annotations:2.22=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
-com.fasterxml.jackson.core:jackson-core:2.22.4=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
-com.fasterxml.jackson.core:jackson-databind:2.22.4=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
-com.fasterxml.jackson:jackson-bom:2.22.4=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.core:jackson-annotations:2.23=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.core:jackson-core:2.23.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.core:jackson-databind:2.23.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson:jackson-bom:2.23.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 com.github.ajalt.clikt:clikt-jvm:5.0.2=ktlint
 com.github.ajalt.clikt:clikt:5.0.2=ktlint
 com.pinterest.ktlint:ktlint-cli-reporter-baseline:1.5.0=ktlint,ktlintBaselineReporter

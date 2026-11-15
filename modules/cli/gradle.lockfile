@@ -3,12 +3,12 @@
 # This file is expected to be part of source control.
 ch.qos.logback:logback-classic:1.5.38=ktlint
 ch.qos.logback:logback-core:1.5.38=ktlint
-com.fasterxml.jackson.core:jackson-annotations:2.22=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
-com.fasterxml.jackson.core:jackson-core:2.22.4=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
-com.fasterxml.jackson.core:jackson-databind:2.22.4=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
-com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.22.4=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
-com.fasterxml.jackson.module:jackson-module-kotlin:2.22.4=runtimeClasspath,testRuntimeClasspath
-com.fasterxml.jackson:jackson-bom:2.22.4=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.core:jackson-annotations:2.23=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.core:jackson-core:2.23.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.core:jackson-databind:2.23.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.23.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.module:jackson-module-kotlin:2.23.0=runtimeClasspath,testRuntimeClasspath
+com.fasterxml.jackson:jackson-bom:2.23.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 com.github.ajalt.clikt:clikt-core-jvm:5.1.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 com.github.ajalt.clikt:clikt-core:5.1.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 com.github.ajalt.clikt:clikt-jvm:5.0.2=ktlint

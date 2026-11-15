@@ -3,13 +3,13 @@
 # This file is expected to be part of source control.
 ch.qos.logback:logback-classic:1.5.38=ktlint,testRuntimeClasspath
 ch.qos.logback:logback-core:1.5.38=ktlint,testRuntimeClasspath
-com.fasterxml.jackson.core:jackson-annotations:2.22=testCompileClasspath,testRuntimeClasspath
-com.fasterxml.jackson.core:jackson-core:2.22.4=testCompileClasspath,testRuntimeClasspath
-com.fasterxml.jackson.core:jackson-databind:2.22.4=testCompileClasspath,testRuntimeClasspath
-com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.22.4=testCompileClasspath,testRuntimeClasspath
-com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.22.4=testRuntimeClasspath
-com.fasterxml.jackson.module:jackson-module-kotlin:2.22.4=testRuntimeClasspath
-com.fasterxml.jackson:jackson-bom:2.22.4=testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.core:jackson-annotations:2.23=testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.core:jackson-core:2.23.0=testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.core:jackson-databind:2.23.0=testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.23.0=testCompileClasspath,testRuntimeClasspath
+com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.23.0=testRuntimeClasspath
+com.fasterxml.jackson.module:jackson-module-kotlin:2.23.0=testRuntimeClasspath
+com.fasterxml.jackson:jackson-bom:2.23.0=testCompileClasspath,testRuntimeClasspath
 com.fasterxml:classmate:1.7.3=testRuntimeClasspath
 com.github.ajalt.clikt:clikt-core-jvm:5.1.0=testCompileClasspath,testRuntimeClasspath
 com.github.ajalt.clikt:clikt-core:5.1.0=testCompileClasspath,testRuntimeClasspath
