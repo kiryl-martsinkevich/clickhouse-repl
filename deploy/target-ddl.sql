@@ -1,4 +1,5 @@
--- Run by the DBAs on every host of a NON-PRODUCTION target (SPEC §10). Never on DR or prod.
+-- Run by the DBAs on every host of a NON-PRODUCTION target (SPEC §10): every replica of every
+-- shard, since the marker table is local to each replica. Never on DR or prod.
 -- Replace <target> with the target's name from the config (e.g. qa1) and list the managed databases.
 
 -- The environment marker the tool checks before every write. Only DBAs may change it.

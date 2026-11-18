@@ -97,6 +97,14 @@ export interface Guard {
   failover?: Reason;
   guarded: boolean;
   replica_delay_seconds?: number;
+  keepers?: Record<string, KeeperStatus>;
+}
+
+export interface KeeperStatus {
+  level: string;
+  state?: string;
+  avg_latency_ms?: number;
+  outstanding_requests?: number;
 }
 
 export interface Stream {

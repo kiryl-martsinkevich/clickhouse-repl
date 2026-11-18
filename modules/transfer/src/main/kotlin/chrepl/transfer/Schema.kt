@@ -248,6 +248,22 @@ object SchemaSync {
             ?: throw SchemaException("${source.qualified}: target table was not created on ${client.endpoint}")
     }
 
+    /**
+     * Creates the table on another replica of a replicated target shard from the writer's own
+     * definition ([primary]), so it joins the same replicated table. Existing tables are left alone:
+     * column changes made on the writer replicate by themselves.
+     */
+    fun ensureReplica(
+        client: ClickHouseClient,
+        primary: TableInfo,
+    ): TableInfo {
+        client.execute("CREATE DATABASE IF NOT EXISTS ${Sql.ident(primary.database)}")
+        SchemaInspector.read(client, primary.database, primary.name)?.let { return it }
+        client.execute(primary.createStatement.replaceFirst(Regex("^\\s*CREATE TABLE "), "CREATE TABLE IF NOT EXISTS "))
+        return SchemaInspector.read(client, primary.database, primary.name)
+            ?: throw SchemaException("${primary.qualified}: target table was not created on ${client.endpoint}")
+    }
+
     private fun alignColumns(
         client: ClickHouseClient,
         source: TableInfo,

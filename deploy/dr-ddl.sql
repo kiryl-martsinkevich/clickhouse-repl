@@ -1,4 +1,5 @@
--- Run by the DBAs on EACH passive DR node individually (SPEC §4.2).
+-- Run by the DBAs on EACH passive DR node individually (SPEC §4.2): every DR replica of every
+-- shard (e.g. all three DR replicas of a 1-shard x 6-replica prod+DR cluster), never on prod.
 --   * Never ON CLUSTER: the cluster definition may include active-DC replicas.
 --   * Only with LOCAL access storage (confirmed for this deployment). With replicated (Keeper)
 --     access storage these users would reach prod; use deploy/dr-users.d/ instead.

@@ -20,17 +20,29 @@ groups:
         annotations:
           summary: DR may be active - replication is stopped
           description: >-
-            Foreign activity on DR or the operator failover flag. No reads run until an operator
+            Foreign activity on DR, a DR Keeper leading, or the operator failover flag. No reads run until an operator
             clears the flag (docs/runbook.md, "DC failover").
 
       - alert: ChreplGuardUnknown
-        expr: max(chrepl_guard_cluster_state) == 3
+        # Per host too: with fail_closed_scope replica an UNKNOWN replica leaves the cluster level GREEN.
+        expr: max(chrepl_guard_cluster_state) == 3 or max(chrepl_guard_state) == 3
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: The Source Guard cannot assess DR
-          description: A DR host is unreachable or its signals are stale; reads are blocked (fail closed).
+          description: A DR host is unreachable or its signals are stale; reads from it are blocked (fail closed).
+
+      - alert: ChreplKeeperUnhealthy
+        expr: max(chrepl_keeper_state) >= 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A DR Keeper node is slow or unreachable - all reads wait
+          description: >-
+            A DR Keeper of the shared prod+DR ensemble is above guard.thresholds.keeper or cannot be
+            polled; reads are blocked until it is quiet again (docs/runbook.md, "DR Keeper slow").
 
       - alert: ChreplCircuitBreakerOpen
         expr: max(chrepl_guard_block_reasons{reason="CIRCUIT_OPEN"}) > 0

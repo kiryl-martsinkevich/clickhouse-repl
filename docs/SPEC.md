@@ -1,6 +1,6 @@
 # clickhouse-repl — Design Specification
 
-Status: **Approved for implementation (rev 3)** · Owner / sign-off: repository owner · Last updated: 2026-10-21
+Status: **Approved for implementation (rev 4: physical clusters, M9)** · Owner / sign-off: repository owner · Last updated: 2026-11-18
 
 `clickhouse-repl` copies data from the production ClickHouse estate into one or more
 non-production ClickHouse environments (QA, UAT, perf). It masks sensitive columns
@@ -14,7 +14,7 @@ connecting to the active production datacentre, and protecting the DR side's own
 staying in sync and ready to take over — with a guard that defers to replication and
 stops immediately if DR becomes active.
 
-### Review decisions (rev 2 and rev 3)
+### Review decisions (rev 2 to rev 4)
 
 | Topic | Decision |
 |-------|----------|
@@ -27,6 +27,8 @@ stops immediately if DR becomes active.
 | Thresholds & impact budget | Signed off by the repository owner. |
 | DR access storage (rev 3) | **Local** (`user_directories` has no replicated storage), so users can be provisioned with SQL on each DR node. |
 | DC-role signal (rev 3) | **No external endpoint.** DR_ACTIVE detection uses foreign activity on DR and the operator failover flag. |
+| Physical clusters (rev 4, M9) | Typical layout: **1 shard × 3 replicas per DC** (prod and DR replicas of one cluster), **Keeper on the same machines**: one ensemble across both DCs in which DR Keepers cannot lead; nonprod **1 shard × 3 replicas** with its own Keepers. Reads go to any healthy DR replica; DR Keepers are watched (§4.9); targets may be replicated (§5.6). The 3 × 1 sharded layout remains supported. |
+| API trigger (rev 4) | Copies are triggered by other systems through the existing ad-hoc call, `POST /api/v1/jobs` (§7.5); no separate endpoint. |
 
 ---
 
@@ -285,9 +287,10 @@ Notes:
 
 ### 4.4 L3 — admission control
 
-Each guard instance polls **each DR host directly** (never the active DC, never via
-`clusterAllReplicas`) every `poll_interval` (default 5 s), with small fixed queries against
-in-memory system tables. An unreachable DR host is an explicit UNKNOWN signal.
+Each guard instance polls **each DR host directly** (every DR replica of every shard, and the
+DR Keeper nodes when configured, §4.9; never the active DC, never via `clusterAllReplicas`)
+every `poll_interval` (default 5 s), with small fixed queries against in-memory system tables.
+An unreachable DR host is an explicit UNKNOWN signal.
 
 **Signals and default thresholds** (configurable; all evaluated per DR host):
 
@@ -303,7 +306,9 @@ in-memory system tables. An unreachable DR host is an explicit UNKNOWN signal.
 | Host | IO wait | `OSIOWaitTimeNormalized` | `> 0.20` |
 | Host | Memory | `MemoryTracking` vs `max_server_memory_usage` | `> 0.60` |
 | Background | Merges / mutations | `system.merges` count; `system.mutations` not done | `> 10` merges or any mutation `> 50 GB` |
+| Keeper (§4.9) | DR Keeper latency / backlog | `mntr`: `zk_avg_latency`, `zk_outstanding_requests` | `> 50 ms` / `> 100`; unreachable = UNKNOWN; blocks every read |
 | DC role | Foreign activity | §4.6 | any → `DR_ACTIVE` |
+| DC role | DR Keeper leads the ensemble | `mntr`: `zk_server_state = leader` on a DR Keeper | → `DR_ACTIVE` |
 | Ops | Blackout / pause / failover flag / circuit | config, Postgres | active |
 
 Because a heavy ingest or mutation in the active DC shows up on DR as fetch backlog,
@@ -383,8 +388,60 @@ role changes automatically.
 ### 4.8 Guard self-impact
 
 ≈ 8 small queries per DR host per 5 s against in-memory system tables, by `repl_guard`
-with `max_threads = 1` and a 10 s timeout. Measured in the M7 load test as part of the
-impact budget. Zero queries to the active DC.
+with `max_threads = 1` and a 10 s timeout, plus one `mntr` per DR Keeper node (no session,
+no Keeper write). Measured in the M7 load test as part of the impact budget. Zero queries to
+the active DC.
+
+### 4.9 Physical clusters: DR replicas and a shared Keeper (M9)
+
+The typical deployment is one ClickHouse cluster stretched over both DCs: **1 shard × 6
+replicas**, 3 in prod and 3 in DR (ReplicatedMergeTree), with ClickHouse Keeper on the same
+machines as **one 6-node ensemble**. The DR Keepers have `can_become_leader=false`, which
+makes them non-voting Raft *learners*: they receive the log but do not vote. Prod writes commit
+with the prod Keepers alone (verified in M9: with all DR nodes stopped, a prod insert completes
+at once), so DR load never slows prod writes through Keeper. The nonprod side is a separate
+cluster of 1 shard × 3 replicas with its own 3-node ensemble.
+
+**Configuration**: a source shard lists all of its DR replicas
+(`shards: [{name: s1, replicas: [dr1, dr2, dr3]}]`; `host:` stays valid for a shard with one
+DR replica), and `sources.<name>.keeper.hosts` lists the DR Keeper client ports. Every
+replica and Keeper host is checked against the active-DC deny-list like any other host.
+
+**Reads go to any admissible replica.** Every DR replica is a guard host. A chunk is read from
+the shard's best replica *at admission*: admissible first, then GREEN before AMBER, then the
+fewest running reads. Cluster-wide tokens (`per_host` applies per replica) are taken on that
+replica, and a chunk pre-empted on one replica may resume on another. Metadata (schema,
+partition lists, watermarks) is read from the replica the gate prefers when the work starts.
+Chunks are defined by predicates (`_partition_id`, COB dates, key ranges), never by part
+names, so replicas give the same rows.
+
+**`fail_closed_scope`** decides what a non-GREEN replica blocks:
+
+| Scope | A non-GREEN replica blocks | Cluster level shown |
+|-------|----------------------------|---------------------|
+| `cluster` (default) | every read | worst host |
+| `shard` | reads from every replica of its shard | worst host |
+| `replica` (recommended with several DR replicas) | reads from itself only | per shard, its best replica; then the worst shard |
+
+A lagging or busy replica is lagging because it is fetching and merging; reading from its
+healthy siblings adds nothing to its load, so `replica` scope keeps copies moving without
+weakening protection. Cluster-wide controls (failover flag, DR_ACTIVE, pause, blackout,
+circuit breaker) and Keeper signals block every read whatever the scope.
+
+**Keeper signals.** The guard sends `mntr` (a read-only four-letter command: no session, no
+znode access) to each DR Keeper every poll. Every DR replica depends on its DC's Keepers, so a
+DR Keeper above `guard.thresholds.keeper` (`max_avg_latency`, `max_outstanding_requests`), or
+unreachable, blocks **every** read until it has been quiet for `stable_window` (fail closed).
+A DR Keeper that reports itself **leader** can only mean the ensemble was reconfigured for a
+failover, so it raises `DR_ACTIVE` (`keeper.leader_means_active`, default on). Learners report
+`standalone` (ClickHouse 25.8 and 26.8) or `follower`; only `leader` is treated as a role change.
+
+**Topology test** (`ClusterIT`): 3 prod + 3 DR replicas with co-located Keepers (one ensemble,
+DR learners) and a 1 × 3 nonprod target with its own ensemble. It checks that the guard
+watches every replica and Keeper, that DR Keepers never lead, that a copy lands identically on
+every nonprod replica, that a replica held back with `SYSTEM STOP FETCHES` turns RED and serves
+no reads while the others do, that the writer fails over when the first nonprod replica is
+down, and that prod is never contacted.
 
 ---
 
@@ -478,7 +535,7 @@ Constraints and validation:
 - Concurrent writers to the same `(target, table, partition)` are serialised by a Postgres advisory lock held during step 3.
 - Consistency is **per partition, per read**: a partition split into several chunks is not a point-in-time snapshot if it changes mid-copy. Continuous mode (§8.2) re-checks fingerprints and re-copies if needed.
 
-### 5.5 Shard mapping (source has 3 shards)
+### 5.5 Shard mapping (sharded sources)
 
 | Target topology | `shard_mapping` | Behaviour |
 |-----------------|-----------------|-----------|
@@ -490,6 +547,38 @@ If a **masked column is part of the sharding key**, `same_shards` keeps rows on 
 original shard index, which no longer matches where the target's `Distributed` table would
 route the masked value (affects shard-local joins and `optimize_skip_unused_shards`).
 Validation warns and recommends `distributed` mapping for such tables.
+
+### 5.6 Replicated targets (M9)
+
+A target with `replicas: N` (> 1) lists `shards × replicas` hosts, shard-major, and needs
+`zookeeper_path_template`, so its tables are `Replicated*MergeTree` with the target's own
+Keeper path (`{database}` and `{table}` are filled in; `{shard}` and `{replica}` stay macros).
+
+- **Writer**: each target shard writes through its first replica that answers within 5 s and
+  has no read-only replicated table (a lost Keeper session). Staging tables (never replicated),
+  `REPLACE PARTITION` and the `repl_meta` writes go to the writer; ReplicatedMergeTree carries the
+  result to the other replicas. The choice is re-checked every 10 s, so the writer fails over
+  when a replica goes down. When no replica is writable (all read-only while the target's Keeper
+  ensemble elects a new leader), the probe is repeated every 2 s for up to 30 s before the job
+  fails. Found in `ClusterIT` on 26.8: stopping the node that held the Keeper leader made the
+  other replicas read-only for a few seconds. Staging tables left on a former writer are dropped by job cleanup
+  on every replica, and a partition whose chunk stagings are missing is copied again (§5.4).
+- **DDL on every replica**: `CREATE TABLE` is not replicated, so the tool creates each table
+  (and each view and its `TO` table) on every reachable replica from the writer's own
+  definition. Column changes are made on the writer only and replicate as ALTERs. A replica
+  that was down when a table was first created gets it at the next copy to that target.
+- **Safety**: the environment marker is checked on every reachable replica before any write.
+- **COB slices**: before keeping the partition's other rows, the writer runs
+  `SYSTEM SYNC REPLICA` on the table, so it never rebuilds a partition from stale local data.
+- **`repl_meta`**: `tables` and `copy_history` are replicated too (same path template, database
+  `repl_meta`), so the key version and the copy history do not depend on which replica wrote.
+- **Locks**: `REPLACE PARTITION` is serialised per *target shard*, table and partition,
+  whichever replica writes.
+- **Keeper hiccups**: `SYSTEM SYNC REPLICA` and the publishing `REPLACE`/`DROP PARTITION` are
+  retried (about 40 s in total) on Keeper errors (`KEEPER_EXCEPTION`, `TABLE_IS_READ_ONLY`), e.g.
+  while the target's Keeper ensemble elects a new leader. Both give the same result when
+  repeated. Found in `ClusterIT`: stopping the replica that hosted the target's Keeper leader
+  failed the publish with an operation timeout.
 
 ---
 
@@ -675,6 +764,11 @@ Implementation notes (M4):
 - The pause and failover flags also stop workers from planning or starting chunks, even for unguarded `dc: test` sources. Planning waits while the guard is not GREEN or AMBER; such jobs show the guard's reason as `wait_reason` while PENDING.
 - The active config version lives in Postgres, so a reload through any API replica applies to every process within 5 s. Source and guard settings are read at startup, so changing them needs a restart.
 - `/api/v1/continuous*` arrive with M5.
+- **Triggering a copy from another system** (a CI pipeline, a test harness, a scheduler) is the
+  same `POST /api/v1/jobs` call the portal and CLI make, with a bearer token for a user or
+  service account whose OIDC groups grant `requester` on the dataset or tables and target. Use
+  an `Idempotency-Key` so a retried call does not start a second job, then poll
+  `GET /api/v1/jobs/{id}` until `state` is terminal. Examples are in the README.
 
 ### 7.5.1 Portal implementation notes (M6)
 
@@ -776,8 +870,8 @@ A complete, annotated example is in [`docs/examples/replicator.yaml`](examples/r
 | Section | Contents |
 |---------|----------|
 | `active_dc` | Deny-list of active-DC hostnames and CIDRs that the tool must never contact. |
-| `sources` | The DR cluster: `dc: dr`, shards with their DR replica, DC-role check, credential references. |
-| `targets` | Shared non-prod environments: hosts, cluster name, shard mapping, ZooKeeper path template, environment marker, table overrides. |
+| `sources` | The DR cluster: `dc: dr`, shards with their DR replica(s) (`host` or `replicas`), `fail_closed_scope`, DR Keeper nodes (`keeper`), DC-role check, credential references. |
+| `targets` | Shared non-prod environments: hosts (shard-major), shards, `replicas`, cluster name, shard mapping, ZooKeeper path template, environment marker, table overrides. |
 | `guard` | Poll interval, thresholds, stable window, concurrency, blackout windows, pre-emption, circuit breaker. |
 | `masking` | Realm, key provider, domains (strategy + options), dictionaries. |
 | `tables` | Table specs: source, COB column, declared `partition_key` / `sharding_key` expressions, column policies, `mv_mode`, overrides, chunk sizing. |
@@ -795,6 +889,7 @@ A complete, annotated example is in [`docs/examples/replicator.yaml`](examples/r
 - Domains referenced exist; `fpe_ff1` domains are explicitly approved.
 - Masking key is a reference (not a literal) and decodes to ≥ 256 bits.
 - Every target declares an environment marker, none is `prod`/`dr`.
+- A source shard gives exactly one of `host` and `replicas`; a target with `replicas > 1` has exactly `shards × replicas` hosts and a `zookeeper_path_template`. DR Keeper hosts are checked against the active-DC deny-list.
 - Continuous intervals ≥ guard `stable_window`; chunk sizes within L1 limits; pre-emption cannot be disabled.
 - (Online, `validate-config --online`) declared schema matches DR `system.columns` on all shards; DR access storage is local (§4.2); L1 profile is in effect for `repl_reader`.
 

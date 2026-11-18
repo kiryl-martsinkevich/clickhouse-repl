@@ -6,6 +6,7 @@ import chrepl.config.model.ConfigDuration
 import chrepl.config.model.FailClosedScope
 import chrepl.config.model.Guard
 import chrepl.config.model.Source
+import chrepl.config.model.SourceShard
 import org.junit.jupiter.api.Test
 import java.nio.file.Path
 import java.time.Clock
@@ -37,11 +38,10 @@ class SourceGuardTest {
 
     private val example = ConfigLoader.load(Path.of(System.getProperty("chrepl.exampleConfig"))).config!!
     private val clock = ManualClock()
-    private val hosts =
-        example.sources
-            .getValue("dr")
-            .shards
-            .map { hostKey(it.host, true) }
+
+    /** The example's DR source (1 shard × 3 replicas) with cluster scope and no Keeper watch, unless a test says otherwise. */
+    private val dr = example.sources.getValue("dr").copy(failClosedScope = FailClosedScope.CLUSTER, keeper = null)
+    private val hosts = dr.shards.flatMap { it.hosts }.map { hostKey(it, true) }
 
     /** Current sample per host; tests change fields to simulate DR conditions. */
     private val current = hosts.associateWith { HostSample(it, clock.now, serverTime = clock.now) }.toMutableMap()
@@ -54,8 +54,9 @@ class SourceGuardTest {
 
     private fun guard(
         config: Guard = example.guard.copy(blackoutWindows = emptyList()),
-        source: Source = example.sources.getValue("dr"),
-    ) = SourceGuard(config, source, signals, flags, { h, q -> kills += h to q }, clock)
+        source: Source = dr,
+        keepers: KeeperSource? = null,
+    ) = SourceGuard(config, source, signals, flags, { h, q -> kills += h to q }, clock, keepers)
 
     private fun set(
         host: String = hosts[0],
@@ -130,8 +131,16 @@ class SourceGuardTest {
     }
 
     @Test
-    fun `with shard scope only the affected host is blocked`() {
-        val g = guard(source = example.sources.getValue("dr").copy(failClosedScope = FailClosedScope.SHARD))
+    fun `with shard scope only the affected shard is blocked`() {
+        val threeShards =
+            dr.copy(
+                shards =
+                    dr.shards
+                        .single()
+                        .hosts
+                        .mapIndexed { i, h -> SourceShard("s${i + 1}", host = h) },
+            )
+        val g = guard(source = threeShards.copy(failClosedScope = FailClosedScope.SHARD))
         g.run(65)
         set(hosts[2]) { copy(error = "connection refused") }
         g.tick()
@@ -154,7 +163,7 @@ class SourceGuardTest {
         g.run(65)
         current[hosts[0]] = current.getValue(hosts[0]).copy(serverTime = Instant.EPOCH)
         val skewed = SignalSource { h -> if (h == hosts[0]) current.getValue(h).copy(takenAt = clock.now) else signals.sample(h) }
-        val g2 = SourceGuard(example.guard.copy(blackoutWindows = emptyList()), example.sources.getValue("dr"), skewed, flags, null, clock)
+        val g2 = SourceGuard(example.guard.copy(blackoutWindows = emptyList()), dr, skewed, flags, null, clock)
         g2.tick()
         assertEquals(GuardLevel.UNKNOWN, g2.status().hosts.getValue(hosts[0]))
         assertTrue(g.status().level != GuardLevel.UNKNOWN)
@@ -275,5 +284,102 @@ class SourceGuardTest {
         assertEquals("KILL QUERY WHERE user = 'repl_reader' AND query_id = 'chrepl-j1-c1-1' ASYNC", killer.statement("chrepl-j1-c1-1"))
         assertFailsWith<IllegalArgumentException> { killer.kill("h", "someone-elses-query") }
         assertFalse("'" in killer.statement("chrepl-x").substringAfter("query_id = '").removeSuffix("' ASYNC"))
+    }
+
+    @Test
+    fun `with replica scope a lagging replica is skipped and reads go to the others`() {
+        val g = guard(source = dr.copy(failClosedScope = FailClosedScope.REPLICA))
+        g.run(65)
+        set(hosts[0]) { copy(replicaDelaySeconds = 120) }
+        g.tick()
+        assertEquals(GuardLevel.GREEN, g.status().level, "the shard still has a GREEN replica")
+        assertEquals(GuardLevel.RED, g.status().hosts.getValue(hosts[0]))
+        assertFalse(g.admissible(hosts[0]))
+        assertEquals(hosts[1], g.preferred(hosts).first())
+        val a = g.acquireAny(hosts, "chrepl-j-c-1", Duration.ofMillis(10))
+        assertEquals(hosts[1], a.host)
+        val b = g.acquireAny(hosts, "chrepl-j-c-2", Duration.ofMillis(10))
+        assertEquals(hosts[2], b.host, "per_host 1: the next read goes to the other GREEN replica")
+        set(hosts[1]) { copy(replicaDelaySeconds = 120) }
+        g.tick()
+        assertTrue(a.cancellation.isCancelled, "only reads on the replica that turned RED are pre-empted")
+        assertFalse(b.cancellation.isCancelled)
+        g.release(a)
+        g.release(b)
+        set(hosts[2]) { copy(error = "connection refused") }
+        g.tick()
+        assertEquals(GuardLevel.RED, g.status().level, "no replica left: the shard is as good as its best replica")
+        assertFailsWith<GuardTimeoutException> { g.acquireAny(hosts, "chrepl-j-c-3", Duration.ofMillis(10)) }
+    }
+
+    private val keeperHosts =
+        example.sources
+            .getValue("dr")
+            .keeper!!
+            .hosts
+            .map { keeperKey(it, false) }
+    private val keeperNow = keeperHosts.associateWith { KeeperSample(it, clock.now, state = "follower", avgLatencyMs = 1.0) }.toMutableMap()
+    private val keepers = KeeperSource { h -> keeperNow.getValue(h).copy(takenAt = clock.now) }
+
+    @Test
+    fun `a slow DR Keeper blocks every read until it is quiet again`() {
+        val g =
+            guard(
+                source = dr.copy(failClosedScope = FailClosedScope.REPLICA, keeper = example.sources.getValue("dr").keeper),
+                keepers = keepers,
+            )
+        g.run(65)
+        assertEquals(GuardLevel.GREEN, g.status().level)
+        val permit = g.tryAcquire()
+        keeperNow[keeperHosts[2]] = keeperNow.getValue(keeperHosts[2]).copy(avgLatencyMs = 80.0)
+        g.tick()
+        assertTrue(permit.cancellation.isCancelled, "Keeper signals apply to the whole cluster, whatever the scope")
+        g.release(permit)
+        assertEquals("KEEPER_LATENCY", assertFailsWith<GuardTimeoutException> { g.tryAcquire(hosts[1]) }.reasons.single().code)
+        assertEquals(
+            80.0,
+            g
+                .status()
+                .keepers
+                .getValue(keeperHosts[2])
+                .avgLatencyMs,
+        )
+        keeperNow[keeperHosts[2]] = keeperNow.getValue(keeperHosts[2]).copy(avgLatencyMs = 1.0, outstandingRequests = 500)
+        g.tick()
+        assertEquals("KEEPER_OUTSTANDING", assertFailsWith<GuardTimeoutException> { g.tryAcquire() }.reasons.single().code)
+        keeperNow[keeperHosts[2]] = keeperNow.getValue(keeperHosts[2]).copy(outstandingRequests = 0)
+        g.run(30)
+        assertEquals("STABILISING", assertFailsWith<GuardTimeoutException> { g.tryAcquire() }.reasons.single().code)
+        g.run(35)
+        g.release(g.tryAcquire())
+    }
+
+    @Test
+    fun `an unreachable DR Keeper fails closed`() {
+        val g = guard(source = dr.copy(keeper = example.sources.getValue("dr").keeper), keepers = keepers)
+        g.run(65)
+        keeperNow[keeperHosts[0]] = KeeperSample(keeperHosts[0], clock.now, error = "connection refused")
+        g.tick()
+        assertEquals("KEEPER_UNREACHABLE", assertFailsWith<GuardTimeoutException> { g.tryAcquire() }.reasons.single().code)
+    }
+
+    @Test
+    fun `a DR Keeper leading the ensemble means DR_ACTIVE`() {
+        val g = guard(source = dr.copy(keeper = example.sources.getValue("dr").keeper), keepers = keepers)
+        g.run(65)
+        keeperNow[keeperHosts[1]] = keeperNow.getValue(keeperHosts[1]).copy(state = "leader")
+        g.tick()
+        assertEquals(GuardLevel.DR_ACTIVE, g.status().level)
+        assertEquals(keeperHosts[1], flags.failover!!.host)
+        assertContains(flags.failover!!.message, "Raft leader")
+    }
+
+    @Test
+    fun `mntr output is parsed`() {
+        val text = "zk_version\tv25.8.1\nzk_avg_latency\t3\nzk_outstanding_requests\t7\nzk_server_state\tfollower\n"
+        val values = MntrKeeperSource.parse(text)
+        assertEquals("follower", values["zk_server_state"])
+        assertEquals("3", values["zk_avg_latency"])
+        assertEquals("7", values["zk_outstanding_requests"])
     }
 }

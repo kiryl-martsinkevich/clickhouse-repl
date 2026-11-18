@@ -23,6 +23,23 @@ internal fun RuleContext.checkSources() {
         }
         if (source.shards.isEmpty()) error(Code.SOURCE_SHARDS, "$path.shards", "at least one shard is required")
         for (dup in source.shards.duplicates { it.name }) error(Code.SOURCE_SHARDS, "$path.shards", "duplicate shard name '$dup'")
+        source.shards.forEachIndexed { i, shard ->
+            when {
+                shard.host != null && shard.replicas.isNotEmpty() ->
+                    error(Code.SOURCE_SHARDS, "$path.shards[$i]", "give either host (one DR replica) or replicas, not both")
+
+                shard.host == null && shard.replicas.isEmpty() ->
+                    error(Code.SOURCE_SHARDS, "$path.shards[$i]", "give the shard's DR replica as host, or its DR replicas as replicas")
+            }
+        }
+        source.keeper?.let { keeper ->
+            if (keeper.hosts.isEmpty()) error(Code.SOURCE_SHARDS, "$path.keeper.hosts", "list the DR Keeper nodes, or remove keeper")
+            for (dup in keeper.hosts.duplicates {
+                it.toString()
+            }) {
+                error(Code.DUPLICATE_HOST, "$path.keeper.hosts", "Keeper node '$dup' is listed twice")
+            }
+        }
         if (source.reader.user == source.guard.user) {
             error(Code.SOURCE_USERS, "$path.guard.user", "reader and guard must be different users (only the guard may KILL QUERY)")
         }
@@ -47,11 +64,26 @@ internal fun RuleContext.checkTargets() {
         val path = "targets.$name"
         if (target.hosts.isEmpty()) error(Code.TARGET_HOSTS, "$path.hosts", "at least one host is required")
         if (target.shards < 1) error(Code.SHARD_MAPPING, "$path.shards", "shards must be at least 1")
-        if (target.hosts.size < target.shards) {
+        if (target.replicas < 1) error(Code.TARGET_HOSTS, "$path.replicas", "replicas must be at least 1")
+        val expected = target.shards * target.replicas
+        if (target.replicas > 1 && target.hosts.size != expected) {
+            error(
+                Code.TARGET_HOSTS,
+                "$path.hosts",
+                "${target.shards} shard(s) × ${target.replicas} replicas need exactly $expected hosts (shard-major), found ${target.hosts.size}",
+            )
+        } else if (target.hosts.size < target.shards) {
             error(
                 Code.TARGET_HOSTS,
                 "$path.hosts",
                 "${target.shards} shards need at least ${target.shards} hosts, found ${target.hosts.size}",
+            )
+        }
+        if (target.replicas > 1 && target.zookeeperPathTemplate == null) {
+            error(
+                Code.TARGET_HOSTS,
+                "$path.zookeeper_path_template",
+                "a target with replicas needs zookeeper_path_template, so its tables are ReplicatedMergeTree",
             )
         }
         when (target.shardMapping) {

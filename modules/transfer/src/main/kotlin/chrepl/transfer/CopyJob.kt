@@ -97,12 +97,48 @@ class CopySession(
         }
     }
 
+    /** Reader clients of every DR replica, per shard name, keyed by `host:port`. */
+    val sourceReplicas: Map<String, Map<String, ClickHouseClient>> by lazy {
+        source.shards.associate { shard ->
+            shard.name to
+                shard.hosts.associate { host ->
+                    clients.create(host, source.tls, source.reader.user, source.reader.password).let { it.endpoint.toString() to it }
+                }
+        }
+    }
+
+    /** One reader client per shard for metadata (schema, planning): the replica the gate prefers when the session starts. */
     val sourceClients: Map<String, ClickHouseClient> by lazy {
-        source.shards.associate { it.name to clients.create(it.host, source.tls, source.reader.user, source.reader.password) }
+        sourceReplicas.mapValues { (_, replicas) -> replicas.getValue(gate.preferred(replicas.keys.toList()).first()) }
     }
-    val targetClients: List<ClickHouseClient> by lazy {
-        target.hosts.take(target.shards).map { clients.create(it, target.tls, target.writer.user, target.writer.password) }
+
+    /** Target shards in order, each with its replicas (`hosts` is shard-major). */
+    val targetShards: List<TargetShard> by lazy {
+        target.hosts
+            .chunked(target.replicas)
+            .take(target.shards)
+            .mapIndexed {
+                i,
+                hosts,
+                ->
+                TargetShard(i, hosts.map { clients.create(it, target.tls, target.writer.user, target.writer.password) })
+            }
     }
+
+    /** The writer of each target shard: its first replica that is up (SPEC §5.2). */
+    val targetClients: List<ClickHouseClient> get() = targetShards.map { it.writer() }
+
+    /** Every target replica (cleanup of staging tables, which live on whichever replica was the writer). */
+    val allTargetClients: List<ClickHouseClient> get() = targetShards.flatMap { it.replicas }
+
+    /** Lock key prefix for one target shard: stable whichever replica writes. */
+    fun lockScope(targetIndex: Int): String = "$targetName/shard${targetIndex + 1}"
+
+    /** Path for `repl_meta` tables on a replicated target, or null (plain MergeTree) for single-replica shards. */
+    private val metaPath: ((String) -> String)? =
+        target.zookeeperPathTemplate?.takeIf { target.replicas > 1 }?.let { template ->
+            { table -> template.replace("{database}", "repl_meta").replace("{table}", table) }
+        }
 
     fun spec(tableName: String): TableSpec =
         config.tables.firstOrNull { it.source == tableName } ?: throw IllegalArgumentException("no table spec for '$tableName'")
@@ -173,17 +209,38 @@ class CopySession(
         }
         engine.compile(spec, sourceInfo.columns) // throws MaskingConfigException listing every problem
 
-        targetClients.forEach { TargetMeta.checkMarker(it, targetName) }
-        targetClients.forEach { TargetMeta.checkKeyVersion(it, database, table, engine.realm, engine.keyVersion, allowRekey) }
+        // Every reachable replica must carry the marker; the writer must be among them.
+        val replicas = targetShards.map { it.writer() to it.reachable() }
+        replicas.forEach { (_, reachable) -> reachable.forEach { TargetMeta.checkMarker(it, targetName) } }
+        replicas.forEach { (writer, _) -> TargetMeta.checkKeyVersion(writer, database, table, engine.realm, engine.keyVersion, allowRekey) }
         val targetInfos =
-            targetClients.map { client ->
-                TargetMeta.ensureTables(client)
-                SchemaSync.ensure(client, sourceInfo, target)
+            replicas.map { (writer, reachable) ->
+                TargetMeta.ensureTables(writer, metaPath)
+                val info = SchemaSync.ensure(writer, sourceInfo, target)
+                // Other replicas get the writer's table (CREATE is not replicated; ALTERs and data are).
+                for (replica in reachable.filter { it !== writer }) {
+                    TargetMeta.ensureTables(replica, metaPath)
+                    SchemaSync.ensureReplica(replica, info)
+                }
+                info
             }
         if (spec.mvMode == MvMode.BASE_ONLY) {
             val sourceClient = sourceClients.values.first()
             val views = MaterializedViews.dependents(sourceClient, database, table)
-            if (views.isNotEmpty()) targetClients.forEach { MaterializedViews.ensureOnTarget(sourceClient, it, target, views) }
+            if (views.isNotEmpty()) {
+                replicas.forEach { (writer, reachable) ->
+                    MaterializedViews.ensureOnTarget(sourceClient, writer, target, views)
+                    reachable.filter { it !== writer }.forEach {
+                        MaterializedViews.ensureOnTarget(
+                            sourceClient,
+                            it,
+                            target,
+                            views,
+                            primary = writer,
+                        )
+                    }
+                }
+            }
         }
 
         val plan = ChunkPlanner(spec.chunk?.maxBytes?.bytes ?: DEFAULT_CHUNK_BYTES).plan(spec, sourceInfo, selection, sourceClients)
@@ -235,7 +292,7 @@ class CopySession(
         val masker = engine.compile(context.spec, context.source.columns)
         return ChunkCopier(context.spec, context.source, gate).copy(
             chunk,
-            sourceClients.getValue(chunk.shard),
+            sourceReplicas.getValue(chunk.shard),
             targetClients[targetIndex],
             context.targets[targetIndex],
             staging,
@@ -259,17 +316,17 @@ class CopySession(
             PartitionAssembler(
                 context.spec,
                 locks,
-            ).assemble(client, context.targets[targetIndex], partitionId, selection, chunkStagings, staging)
+            ).assemble(client, lockScope(targetIndex), context.targets[targetIndex], partitionId, selection, chunkStagings, staging)
         TargetMeta.recordCopy(client, record.copy(sourceDelaySeconds = record.sourceDelaySeconds ?: sourceDelay(context)))
         return total
     }
 
     fun finishTable(context: TableContext) =
-        targetClients.forEach {
+        targetClients.forEachIndexed { i, it ->
             TargetMeta.recordKeyVersion(it, context.database, context.table, engine.realm, engine.keyVersion)
             // Views do not fire on partition replacement: rebuild their targets from the copied base table.
             if (context.spec.mvMode == MvMode.BASE_ONLY) {
-                locks.withLock("${it.endpoint}/${context.database}.${context.table}/views") {
+                locks.withLock("${lockScope(i)}/${context.database}.${context.table}/views") {
                     MaterializedViews.recompute(it, context.database, context.table)
                 }
             }

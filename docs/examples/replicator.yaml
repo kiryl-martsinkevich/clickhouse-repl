@@ -12,15 +12,19 @@ version: 1
 active_dc:
   name: dc-prod
   hosts:
-    - ch-prod-s1.dc-prod.internal
-    - ch-prod-s2.dc-prod.internal
-    - ch-prod-s3.dc-prod.internal
+    - ch-prod-1.dc-prod.internal
+    - ch-prod-2.dc-prod.internal
+    - ch-prod-3.dc-prod.internal
   cidrs:
     - 10.10.0.0/16
 
 # ---------------------------------------------------------------------------
-# Source: the passive DR cluster (3 shards x 1 replica, ReplicatedMergeTree
-# replicas of prod). Only ever read.
+# Source: the passive DR replicas. Typical physical layout: one ClickHouse
+# cluster of 1 shard x 6 replicas (3 in prod, 3 in DR, ReplicatedMergeTree),
+# with ClickHouse Keeper on the same machines: one 6-node ensemble across both
+# DCs, DR Keepers configured with can_become_leader=false (non-voting learners:
+# prod writes commit on the prod Keepers alone). Only DR is listed here and only
+# DR is ever contacted (read, and watched by the guard).
 # ---------------------------------------------------------------------------
 sources:
   dr:
@@ -34,14 +38,21 @@ sources:
     guard:                                   # system tables + KILL own-user queries
       user: repl_guard
       password: ${file:/var/run/secrets/chrepl/dr-guard-password}
-    shards:                                  # the single DR replica of each shard is both read and watch host
+    shards:                                  # every DR replica is watched; reads go to any admissible one
       - name: s1
-        host: ch-dr-s1.dc-dr.internal:8443
-      - name: s2
-        host: ch-dr-s2.dc-dr.internal:8443
-      - name: s3
-        host: ch-dr-s3.dc-dr.internal:8443
-    fail_closed_scope: cluster               # cluster | shard: one UNKNOWN host stops all reads (default) or just its shard
+        replicas:
+          - ch-dr-1.dc-dr.internal:8443
+          - ch-dr-2.dc-dr.internal:8443
+          - ch-dr-3.dc-dr.internal:8443
+      # A shard with a single DR replica is written as:  - { name: s2, host: ch-dr-s2.dc-dr.internal:8443 }
+    fail_closed_scope: replica               # cluster | shard | replica: what a non-GREEN replica blocks (default cluster)
+    keeper:                                  # DR Keeper nodes of the shared prod+DR ensemble (SPEC §4.4)
+      hosts:                                 # polled with the read-only `mntr` four-letter command
+        - ch-dr-1.dc-dr.internal:9181
+        - ch-dr-2.dc-dr.internal:9181
+        - ch-dr-3.dc-dr.internal:9181
+      tls: false                             # true for Keeper's secure port (9281)
+      leader_means_active: true              # a DR Keeper leading the ensemble => DR_ACTIVE
     dc_role_check:                           # SPEC §4.6 — any trigger => DR_ACTIVE
       foreign_activity: true                 # non-repl_* queries or InsertQuery deltas on DR hosts
       ignored_users: [monitoring]            # legitimate read-only users on DR (open question §13.2-2)
@@ -51,17 +62,18 @@ sources:
 # Targets: shared non-production environments.
 # ---------------------------------------------------------------------------
 targets:
-  qa1:
-    hosts: [ch-qa1-s1.nonprod.internal:8443, ch-qa1-s2.nonprod.internal:8443, ch-qa1-s3.nonprod.internal:8443]
+  qa1:                                       # 1 shard x 3 replicas with its own Keepers on the same machines
+    hosts: [ch-qa1-1.nonprod.internal:8443, ch-qa1-2.nonprod.internal:8443, ch-qa1-3.nonprod.internal:8443]
     cluster_name: qa1
-    shards: 3
-    shard_mapping: same_shards               # same_shards | distributed | single (SPEC §5.5)
+    shards: 1
+    replicas: 3                              # hosts are shard-major: shards x replicas entries
+    shard_mapping: single                    # same_shards | distributed | single (SPEC §5.5)
     tls: true
     writer:
       user: repl_writer
       password: ${file:/var/run/secrets/chrepl/qa1-writer-password}
     environment_marker: qa1                  # must equal SELECT value FROM repl_meta.environment
-    zookeeper_path_template: /clickhouse/qa1/tables/{shard}/{database}/{table}
+    zookeeper_path_template: /clickhouse/qa1/tables/{shard}/{database}/{table}   # required with replicas > 1
     recent_copy_warning: 24h                 # warn before replacing a slice someone else copied recently
     table_overrides:
       ttl: "cob_date + INTERVAL 90 DAY"      # applied where the table has cob_date; keeps QA small
@@ -102,9 +114,12 @@ guard:
     background:
       max_active_merges: 10
       max_mutation_bytes: 50GiB
+    keeper:                                  # each DR Keeper node (sources.dr.keeper); blocks every read
+      max_avg_latency: 50ms                  # zk_avg_latency: the DR replicas' own Keeper operations
+      max_outstanding_requests: 100          # zk_outstanding_requests
   concurrency:
-    global: 2                                # concurrent chunk reads across the DR cluster
-    per_host: 1                              # each DR replica is the only copy of its shard in DR
+    global: 2                                # concurrent chunk reads across the DR replicas
+    per_host: 1                              # per DR replica
   preemption:
     kill_grace: 5s                           # preemption cannot be disabled (validation)
   circuit_breaker:

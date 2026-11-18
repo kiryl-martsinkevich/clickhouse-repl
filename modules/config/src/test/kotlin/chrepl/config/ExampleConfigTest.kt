@@ -2,6 +2,7 @@ package chrepl.config
 
 import chrepl.config.load.ConfigLoader
 import chrepl.config.model.ColumnPolicy
+import chrepl.config.model.FailClosedScope
 import chrepl.config.model.ShardMapping
 import chrepl.config.model.Strategy
 import chrepl.config.validate.ValidationOptions
@@ -25,10 +26,15 @@ class ExampleConfigTest {
     fun `example config binds to the model`() {
         val config = assertNotNull(ConfigLoader.load(Fixtures.examplePath).config)
         val dr = config.sources.getValue("dr")
-        assertEquals(3, dr.shards.size)
-        assertEquals("ch-dr-s1.dc-dr.internal", dr.shards[0].host.host)
-        assertEquals(8443, dr.shards[0].host.port)
-        assertEquals(ShardMapping.SAME_SHARDS, config.targets.getValue("qa1").shardMapping)
+        assertEquals(1, dr.shards.size)
+        assertEquals(3, dr.shards[0].hosts.size)
+        assertEquals("ch-dr-1.dc-dr.internal", dr.shards[0].hosts[0].host)
+        assertEquals(8443, dr.shards[0].hosts[0].port)
+        assertEquals(FailClosedScope.REPLICA, dr.failClosedScope)
+        assertEquals(9181, dr.keeper!!.hosts[0].port)
+        val qa1 = config.targets.getValue("qa1")
+        assertEquals(ShardMapping.SINGLE, qa1.shardMapping)
+        assertEquals(3, qa1.replicas)
         assertEquals(
             Strategy.FPE_FF1,
             config.masking.domains

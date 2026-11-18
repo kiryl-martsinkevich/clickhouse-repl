@@ -24,13 +24,24 @@ internal fun RuleContext.checkIsolation() {
 
     val sourceEndpoints =
         config.sources.flatMap { (name, source) ->
-            source.shards.mapIndexed { i, shard -> Endpoint("sources.$name.shards[$i].host", shard.host) }
+            source.shards.flatMapIndexed { i, shard ->
+                shard.host?.let { listOf(Endpoint("sources.$name.shards[$i].host", it)) }
+                    ?: shard.replicas.mapIndexed { r, host -> Endpoint("sources.$name.shards[$i].replicas[$r]", host) }
+            }
+        }
+    // Keeper nodes share machines with DR replicas (other ports): checked against the deny-list, not for duplicates.
+    val keeperEndpoints =
+        config.sources.flatMap { (name, source) ->
+            source.keeper
+                ?.hosts
+                .orEmpty()
+                .mapIndexed { i, host -> Endpoint("sources.$name.keeper.hosts[$i]", host) }
         }
     val targetEndpoints =
         config.targets.flatMap { (name, target) ->
             target.hosts.mapIndexed { i, host -> Endpoint("targets.$name.hosts[$i]", host) }
         }
-    val all = sourceEndpoints + targetEndpoints
+    val all = sourceEndpoints + keeperEndpoints + targetEndpoints
 
     for (endpoint in all) {
         val host = endpoint.host.normalizedHost

@@ -55,6 +55,11 @@ internal fun RuleContext.checkGuard() {
     if (replication.maxReplicaDelay.value.isZero) {
         error(Code.GUARD_THRESHOLD, "$path.thresholds.replication.max_replica_delay", "must be positive")
     }
+    val keeper = guard.thresholds.keeper
+    if (keeper.maxAvgLatency.value.isZero) error(Code.GUARD_THRESHOLD, "$path.thresholds.keeper.max_avg_latency", "must be positive")
+    if (keeper.maxOutstandingRequests < 1) {
+        error(Code.GUARD_THRESHOLD, "$path.thresholds.keeper.max_outstanding_requests", "must be at least 1")
+    }
 
     val concurrency = guard.concurrency
     if (concurrency.perHost < 1 || concurrency.global < concurrency.perHost) {

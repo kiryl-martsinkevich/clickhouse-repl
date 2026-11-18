@@ -59,6 +59,11 @@ Docker containers driven through the `docker` CLI (`modules/it`, `./gradlew :it:
 The tool under test is given **only DR and target addresses**; the "prod" container is listed in
 `active_dc`.
 
+M9 adds the physical layout (`ClusterTopology`, used by `ClusterIT`): 3 "prod" + 3 "DR" replicas of
+one shard, each with an embedded Keeper in one 6-node ensemble (DR Keepers cannot lead), and a
+1 × 3 "nonprod" target with its own 3-node ensemble. DR Keeper client ports are published so
+the guard can poll them.
+
 ## 2. Cross-cutting rules (apply to every milestone)
 
 - **Never connect to the active DC.** Config validation rejects active-DC hosts/CIDRs; the Helm chart's NetworkPolicy allows egress only to DR hosts, targets, Postgres, OIDC and the key store; every IT asserts the "prod" container's `system.query_log` contains no `repl_*` user.
@@ -386,6 +391,33 @@ Exit criteria
 - IT against a DSM sandbox or a mock implementing the DSM unwrap API: masked output identical to the `static` provider for the same key material.
 - Security review of DSM credentials handling.
 
+### M9 — Physical clusters: DR replicas, shared Keeper, replicated targets (M) — ✅ done
+
+The typical layout: 3 prod + 3 DR replicas of one shard with Keeper on the same machines (one
+ensemble, DR Keepers `can_become_leader=false`), and nonprod as 1 shard × 3 replicas with its own
+Keepers (SPEC §4.9, §5.6).
+
+Delivered:
+- Config: source shards with `replicas`, `fail_closed_scope: replica`, `sources.*.keeper`
+  (DR Keeper hosts), `guard.thresholds.keeper`, target `replicas`; validation of each, Keeper
+  hosts in the active-DC checks.
+- Source Guard: every DR replica is a guard host; `replica`/`shard`/`cluster` scope; the best
+  admissible replica is chosen per read (in-process and through the Postgres tokens); Keeper
+  `mntr` polling (latency, outstanding requests, unreachable → block everything; DR Keeper as
+  leader → DR_ACTIVE); Keeper status in the API, the portal and metrics.
+- Replicated targets: writer per shard with failover, DDL on every replica from the writer's
+  definition, marker check on every replica, replicated `repl_meta`, `SYSTEM SYNC REPLICA`
+  before COB-slice rebuilds, locks per target shard, staging cleanup on every replica.
+- `ClusterIT` (9 ClickHouse containers + Postgres) and a 9-node demo (`demo/run.sh`), which
+  triggers the copy with `curl POST /api/v1/jobs`.
+- Finding: with `can_become_leader=false` the DR Keepers are non-voting learners (prod writes
+  commit with all DR nodes stopped); they report `zk_server_state = standalone` on 25.8 and 26.8.
+
+Open:
+- Run against the real DR and nonprod clusters in staging: thresholds for Keeper latency, and the
+  failover drill with the Keeper reconfiguration step (a DR Keeper leading must raise DR_ACTIVE).
+- `shard_mapping: distributed` is still not implemented (unchanged).
+
 ### Later (not scheduled)
 
 - Restricted custom filters (SPEC §7.6).
@@ -400,6 +432,7 @@ Exit criteria
 M0 ─► M1 ─► M2 ─► M3 ─► M4 ─┬─► M5 ─┬─► M7
                             └─► M6 ─┘
        M1 ───────────────────────────────► M8 (any time after M1; before key custody moves to DSM)
+                         M3, M4 ─────────► M9 (physical clusters)
 ```
 
 M1 and the read/write half of M2 can proceed in parallel with two engineers; M5 and M6 can
@@ -409,7 +442,8 @@ proceed in parallel after M4.
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Each DR shard has only one replica, shared with fetches/merges | Our reads slow DR replication → RPO grows | Replication-lag gating and pre-emption; concurrency 1 per host; workload scheduling favouring background work; M7 load test against the impact budget. |
+| Each DR shard has only one replica, shared with fetches/merges | Our reads slow DR replication → RPO grows | Replication-lag gating and pre-emption; concurrency 1 per host; workload scheduling favouring background work; M7 load test against the impact budget. With several DR replicas (M9), `fail_closed_scope: replica` moves reads off a lagging replica. |
+| DR shares a Keeper ensemble with prod (M9) | DR Keeper trouble slows DR; a mis-set ensemble could let DR Keepers vote or lead | DR Keepers are learners (`can_become_leader=false`; prod commits without them); the guard blocks on DR Keeper latency/backlog/unreachability and raises DR_ACTIVE if one leads; `mntr` only, no Keeper writes. |
 | DR access storage replicated via Keeper, or DDL run `ON CLUSTER` | Replication users appear on the active DC | Provision via `users.d` XML on DR nodes only; `validate-config --online` checks `system.user_directories`; runbook warning. |
 | Failover not detected (DR serves traffic but no foreign queries seen in a poll) | Reads on a now-active DC | Failover flag is step 1 of the failover runbook; foreign queries and `InsertQuery` deltas as safety net; manual clear only. No external role signal exists. |
 | DNS change points a DR name at the active DC | Contact with active DC | Runtime DNS re-check against the CIDR deny-list; NetworkPolicy blocks egress regardless. |

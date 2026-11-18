@@ -574,7 +574,8 @@ class Worker(
                     }
                 }
             val databases = tables.map { it.substringBefore('.') }.distinct()
-            for (client in session.targetClients) {
+            // Stagings live on whichever replica was the writer: clean every replica.
+            for (client in session.allTargetClients) {
                 for (db in databases) {
                     for (s in stagings) {
                         runCatching {

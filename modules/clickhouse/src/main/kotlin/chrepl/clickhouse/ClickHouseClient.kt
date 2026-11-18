@@ -102,12 +102,13 @@ class ClickHouseClient(
             .toList()
     }
 
-    /** A single scalar value as text (`FORMAT TSV`, first row and column). */
+    /** A single scalar value as text (`FORMAT TSV`, first row and column); [timeout] bounds the wait for the response. */
     fun queryScalar(
         sql: String,
         settings: Map<String, String> = emptyMap(),
+        timeout: Duration? = null,
     ): String? =
-        send("$sql\nFORMAT TSV", settings, null)
+        send("$sql\nFORMAT TSV", settings, null, timeout = timeout)
             .use { String(it.readAllBytes()) }
             .lineSequence()
             .firstOrNull()
@@ -194,8 +195,13 @@ class ClickHouseClient(
         settings: Map<String, String>,
         queryId: String?,
         cancellation: Cancellation? = null,
+        timeout: Duration? = null,
     ): InputStream {
-        val request = request(settings, queryId).POST(HttpRequest.BodyPublishers.ofString(sql)).build()
+        val request =
+            request(settings, queryId)
+                .POST(HttpRequest.BodyPublishers.ofString(sql))
+                .apply { timeout?.let { timeout(it) } }
+                .build()
         val future = http.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream())
         cancellation?.attach(future)
         val response =

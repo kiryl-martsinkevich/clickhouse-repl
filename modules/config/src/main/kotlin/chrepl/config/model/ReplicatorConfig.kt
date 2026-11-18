@@ -43,15 +43,45 @@ data class Source(
     val shards: List<SourceShard>,
     val failClosedScope: FailClosedScope = FailClosedScope.CLUSTER,
     val dcRoleCheck: DcRoleCheck = DcRoleCheck(),
+    /** ClickHouse Keeper nodes in the DR DC, when DR shares a Keeper ensemble with the active DC (SPEC §4.4). */
+    val keeper: KeeperWatch? = null,
 )
 
+/**
+ * One DR shard. Give either [host] (a shard with one DR replica) or [replicas] (every DR replica of
+ * the shard). Each replica is watched by the guard; reads go to any admissible replica.
+ */
 data class SourceShard(
     val name: String,
-    /** The shard's single DR replica: both read and watch host. */
-    val host: HostPort,
-)
+    val host: HostPort? = null,
+    val replicas: List<HostPort> = emptyList(),
+) {
+    /** The shard's DR replicas, in configured order. */
+    @get:com.fasterxml.jackson.annotation.JsonIgnore
+    val hosts: List<HostPort> get() = replicas.ifEmpty { listOfNotNull(host) }
+}
 
-enum class FailClosedScope { CLUSTER, SHARD }
+/**
+ * What a non-GREEN DR replica blocks: every read ([CLUSTER]), reads from replicas of its shard
+ * ([SHARD]), or only reads from itself ([REPLICA]). Cluster-wide controls and Keeper signals
+ * always block every read.
+ */
+enum class FailClosedScope { CLUSTER, SHARD, REPLICA }
+
+/**
+ * DR Keeper nodes the guard polls with the `mntr` four-letter command (SPEC §4.9). When the DR
+ * replicas share a Keeper ensemble with the active DC and the DR Keepers have
+ * `can_become_leader=false`, they are non-voting learners: the DR replicas depend on them, so a slow
+ * or unreachable DR Keeper blocks reads, and a DR Keeper that leads the ensemble means it was
+ * reconfigured for a failover (DR_ACTIVE).
+ */
+data class KeeperWatch(
+    val hosts: List<HostPort>,
+    /** Use TLS for the four-letter-word connection (Keeper's secure port). */
+    val tls: Boolean = false,
+    /** Raise DR_ACTIVE when a DR Keeper is the leader; DR Keepers with can_become_leader=false never lead while DR is passive. */
+    val leaderMeansActive: Boolean = true,
+)
 
 data class DcRoleCheck(
     val foreignActivity: Boolean = true,
@@ -61,9 +91,12 @@ data class DcRoleCheck(
 // ---------------------------------------------------------------------------- targets
 
 data class Target(
+    /** Shard-major: the replicas of shard 1, then of shard 2, … (`shards` × `replicas` hosts). */
     val hosts: List<HostPort>,
     val clusterName: String,
     val shards: Int = 1,
+    /** Replicas per shard; above 1 the target tables are ReplicatedMergeTree (`zookeeper_path_template`). */
+    val replicas: Int = 1,
     val shardMapping: ShardMapping,
     val tls: Boolean = true,
     val writer: Credentials,
@@ -100,6 +133,15 @@ data class Thresholds(
     val replication: ReplicationThresholds,
     val host: HostThresholds,
     val background: BackgroundThresholds,
+    val keeper: KeeperThresholds = KeeperThresholds(),
+)
+
+/** Limits for the DR Keeper nodes (`sources.*.keeper`); ignored when no Keeper nodes are listed. */
+data class KeeperThresholds(
+    /** `zk_avg_latency` of a DR Keeper node. */
+    val maxAvgLatency: ConfigDuration = ConfigDuration.parse("50ms"),
+    /** `zk_outstanding_requests` of a DR Keeper node. */
+    val maxOutstandingRequests: Int = 100,
 )
 
 data class ReplicationThresholds(

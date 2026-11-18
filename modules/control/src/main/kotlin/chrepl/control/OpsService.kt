@@ -16,6 +16,8 @@ data class GuardView(
     val guarded: Boolean,
     /** How far DR trails the active DC: the freshness of anything read now. */
     val replicaDelaySeconds: Long? = null,
+    /** DR Keeper nodes of a shared prod+DR ensemble, when configured. */
+    val keepers: Map<String, chrepl.guard.KeeperStatus> = emptyMap(),
 )
 
 /**
@@ -48,6 +50,7 @@ class OpsService(
             failover = flags.failover,
             guarded = status != null,
             replicaDelaySeconds = status?.replicaDelaySeconds,
+            keepers = status?.keepers ?: emptyMap(),
         )
     }
 

@@ -30,7 +30,7 @@ class ActiveDcWatchTest {
     @Test
     fun `a target host that starts resolving into the active DC trips the failover flag`() {
         val flags = InMemoryOpsFlags()
-        val violations = ActiveDcWatch({ config }, flags, resolver("ch-qa1-s1.nonprod.internal" to "10.10.4.2")).check()
+        val violations = ActiveDcWatch({ config }, flags, resolver("ch-qa1-1.nonprod.internal" to "10.10.4.2")).check()
         assertEquals("ACTIVE_DC_CIDR", violations.single().code.name)
         val reason = assertNotNull(flags.failover)
         assertEquals("ACTIVE_DC", reason.code)

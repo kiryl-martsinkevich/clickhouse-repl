@@ -64,6 +64,8 @@ object MaterializedViews {
         targetClient: ClickHouseClient,
         target: Target,
         views: List<ViewInfo>,
+        /** On a replicated target shard, the writer whose tables the other replicas copy. */
+        primary: ClickHouseClient? = null,
     ) {
         for (view in views) {
             val toInfo =
@@ -71,7 +73,14 @@ object MaterializedViews {
                     ?: throw SchemaException(
                         "view ${view.database}.${view.name} writes to ${view.toDatabase}.${view.toTable}, which is missing on DR",
                     )
-            SchemaSync.ensure(targetClient, toInfo, target)
+            if (primary == null) {
+                SchemaSync.ensure(targetClient, toInfo, target)
+            } else {
+                val onPrimary =
+                    SchemaInspector.read(primary, view.toDatabase, view.toTable)
+                        ?: throw SchemaException("${view.toDatabase}.${view.toTable} is missing on the writer ${primary.endpoint}")
+                SchemaSync.ensureReplica(targetClient, onPrimary)
+            }
             if (targetClient.queryScalar("EXISTS TABLE ${Sql.ident(view.database)}.${Sql.ident(view.name)}") != "1") {
                 targetClient.execute(
                     view.createStatement.replaceFirst("CREATE MATERIALIZED VIEW", "CREATE MATERIALIZED VIEW IF NOT EXISTS"),

@@ -33,16 +33,25 @@ object ItFixtures {
         return config
     }
 
-    /** The example config tree pointed at the test containers. */
+    /**
+     * The example config tree pointed at the test containers: three standalone source shards
+     * (`dc: test`) and qa1 as three shards (`same_shards`), so sharding stays covered whatever
+     * layout the example shows. ClusterIT covers the replicated layout.
+     */
     fun configTree(mutate: ObjectNode.() -> Unit = {}): ObjectNode {
         val tree = ConfigLoader.readTree(examplePath)
         val dr = tree.child("sources").child("dr")
         dr.put("dc", "test")
         dr.put("tls", false)
-        dr.get("shards").forEachIndexed { i, shard -> (shard as ObjectNode).put("host", ItCluster.sources[i].hostPort) }
+        dr.remove("keeper")
+        dr.put("fail_closed_scope", "cluster")
+        dr.putArray("shards").also { a ->
+            ItCluster.sources.forEachIndexed { i, node -> a.addObject().put("name", "s${i + 1}").put("host", node.hostPort) }
+        }
         val qa1 = tree.child("targets").child("qa1")
         qa1.remove("zookeeper_path_template")
         qa1.put("tls", false)
+        qa1.put("shards", 3).put("replicas", 1).put("shard_mapping", "same_shards")
         qa1.putArray("hosts").also { a -> ItCluster.qa.forEach { a.add(it.hostPort) } }
         val uat = tree.child("targets").child("uat")
         uat.remove("zookeeper_path_template")
