@@ -23,12 +23,15 @@ Docs:
 
 ## Demo
 
-One command starts a small but complete setup in Docker:
-- a "prod" ClickHouse replica and its "DR" replica (ReplicatedMergeTree through Keeper);
-- a `qa1` target, Postgres, a development-only OIDC provider and the app.
+One command starts the physical layout in miniature, in Docker:
+- 3 "prod" + 3 "DR" ClickHouse replicas of one shard (ReplicatedMergeTree), with Keeper on every
+  node as one ensemble in which the DR Keepers cannot lead;
+- the `qa1` target as 1 shard × 3 replicas with its own Keepers;
+- Postgres, a development-only OIDC provider and the app.
 
 It then seeds fictional trading data on prod and copies one COB date of the `trading-eod` dataset
-to `qa1` through the API, as QA user `alice` would. Needs Docker with Compose, JDK 21 and Node.js 22.
+to `qa1` with a `POST /api/v1/jobs` call, as QA user `alice` would. Needs Docker with Compose
+(about 4 GB of memory for the nine ClickHouse nodes), JDK 21 and Node.js 22.
 
 ```bash
 demo/run.sh          # build, start, seed, copy, and show source vs masked rows
@@ -38,8 +41,15 @@ demo/run.sh down     # remove everything
 What it shows (abridged output):
 
 ```text
-▶ Waiting for the Source Guard to see DR as GREEN
-{"level":"GREEN","hosts":{"dr:8123":"GREEN"},"reasons":[],"active_reads":0,"paused":false,"guarded":true,"replica_delay_seconds":0}
+▶ Sample tables on all 6 replicas (ReplicatedMergeTree); data inserted on prod1 only and replicated to DR
+rows on dr1: 6000 trades
+rows on dr2: 6000 trades
+rows on dr3: 6000 trades
+
+▶ Waiting for the Source Guard to see the DR replicas and DR Keepers as GREEN
+{"level":"GREEN","hosts":{"dr1:8123":"GREEN","dr2:8123":"GREEN","dr3:8123":"GREEN"},"reasons":[],"active_reads":0,
+ "keepers":{"dr1:9181":{"level":"GREEN","state":"standalone","avg_latency_ms":0.0,"outstanding_requests":0},
+            "dr2:9181":{"level":"GREEN","state":"standalone",...},"dr3:9181":{"level":"GREEN","state":"standalone",...}},...}
 
 ▶ alice (QA) estimates a copy of the trading-eod dataset for COB 2026-10-01 to qa1
 trading.trades                        1 partitions           6000 rows           215821 bytes
@@ -47,10 +57,9 @@ trading.positions                     1 partitions           3000 rows          
 crm.customers                         1 partitions           2000 rows            49061 bytes
 refdata.instruments                   1 partitions            500 rows             6674 bytes
 
-▶ ... and submits it
-jb2cbf33aa31b43e9 PENDING
-jb2cbf33aa31b43e9 RUNNING qa1 chunks 3/4 partitions 3/4 rows 5000
-jb2cbf33aa31b43e9 SUCCEEDED qa1 chunks 4/4 partitions 4/4 rows 5500
+▶ ... and submits it through the REST API (the CLI and the portal use the same call)
+{"id":"jd2728ddba7a34243","kind":"adhoc","requester":"alice","target":"qa1","dataset":"trading-eod","state":"PENDING",...}
+jd2728ddba7a34243 SUCCEEDED qa1 chunks 4/4 partitions 4/4 rows 5500
 
 ▶ Production data (queried on prod by the demo, never by the tool)
    ┌─trade_id─┬─customer_id─┬─account_number───────┬─counterparty_name─┬─notional─┬─trader_comment─────┬─client_email─────┐
@@ -66,8 +75,18 @@ jb2cbf33aa31b43e9 SUCCEEDED qa1 chunks 4/4 partitions 4/4 rows 5500
    ┌─trades─┬─with_customer─┐
 1. │   2000 │          2000 │
 
+▶ Every qa1 replica has the copy (written once, replicated by qa1's own Keepers)
+qa1-1: 2000 trades, engine ReplicatedMergeTree
+qa1-2: 2000 trades, engine ReplicatedMergeTree
+qa1-3: 2000 trades, engine ReplicatedMergeTree
+
+▶ Which DR replicas served the chunk reads (any admissible replica; at most one read per replica at a time)
+dr1: 3 chunk reads
+dr2: 1 chunk reads
+dr3: 0 chunk reads
+
 ▶ The tool never touched prod
-queries on prod by repl_* users: 0
+queries on prod1-3 by repl_* users: 0
 ```
 
 Then open the portal at http://localhost:8080 and sign in as `alice`, `bob` (QA), `olga`

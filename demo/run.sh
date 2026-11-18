@@ -101,10 +101,10 @@ for node in "${QA1[@]}"; do
   echo "$node: $(query "$node" "SELECT count() FROM trading.trades WHERE trade_date = '2026-10-01'") trades, engine $(query "$node" "SELECT engine FROM system.tables WHERE database = 'trading' AND name = 'trades'")"
 done
 
-step "Which DR replicas served the reads"
+step "Which DR replicas served the chunk reads (any admissible replica; at most one read per replica at a time)"
 for node in "${DR[@]}"; do
   query "$node" "SYSTEM FLUSH LOGS"
-  echo "$node: $(query "$node" "SELECT count() FROM system.query_log WHERE user = 'repl_reader' AND type = 'QueryFinish' AND query_kind = 'Select'") reads"
+  echo "$node: $(query "$node" "SELECT count() FROM system.query_log WHERE user = 'repl_reader' AND type = 'QueryFinish' AND query_id LIKE 'chrepl-j%'") chunk reads"
 done
 
 step "The tool never touched prod"
