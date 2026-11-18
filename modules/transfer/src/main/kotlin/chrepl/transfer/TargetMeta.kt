@@ -2,6 +2,7 @@ package chrepl.transfer
 
 import chrepl.clickhouse.ClickHouseClient
 import chrepl.clickhouse.ClickHouseException
+import chrepl.clickhouse.Sql
 
 /** Writing to this target is refused (SPEC §10, target safety). */
 class TargetSafetyException(
@@ -34,12 +35,25 @@ object TargetMeta {
         }
     }
 
-    fun ensureTables(client: ClickHouseClient) {
+    /**
+     * Creates the tool's `repl_meta` tables if missing. On a replicated target, [replicatedPath] gives
+     * each table's Keeper path, so they replicate like the data (the writer may change between jobs).
+     */
+    fun ensureTables(
+        client: ClickHouseClient,
+        replicatedPath: ((table: String) -> String)? = null,
+    ) {
+        fun engine(
+            name: String,
+            table: String,
+            args: List<String>,
+        ) = replicatedPath?.let { path -> "Replicated$name(${(listOf(Sql.string(path(table)), "'{replica}'") + args).joinToString(", ")})" }
+            ?: "$name(${args.joinToString(", ")})"
         client.execute(
             """
             CREATE TABLE IF NOT EXISTS repl_meta.tables (
                 database String, table String, realm String, key_version UInt32, updated_at DateTime DEFAULT now()
-            ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (database, table)
+            ) ENGINE = ${engine("ReplacingMergeTree", "tables", listOf("updated_at"))} ORDER BY (database, table)
             """.trimIndent(),
         )
         client.execute(
@@ -48,7 +62,7 @@ object TargetMeta {
                 job_id String, requester String, database String, table String, partition_id String,
                 cob_dates Array(Date), rows UInt64, realm String, key_version UInt32, config_version String,
                 source_delay_seconds Nullable(UInt32), copied_at DateTime64(3) DEFAULT now64(3)
-            ) ENGINE = MergeTree ORDER BY (database, table, partition_id, copied_at)
+            ) ENGINE = ${engine("MergeTree", "copy_history", emptyList())} ORDER BY (database, table, partition_id, copied_at)
             """.trimIndent(),
         )
     }
@@ -160,6 +174,22 @@ interface ReadGate {
         queryId: String,
         read: (chrepl.clickhouse.Cancellation) -> T,
     ): T
+
+    /** [hosts] (replicas of one shard) best first for the next read; unchanged when the gate has no opinion. */
+    fun preferred(hosts: List<String>): List<String> = hosts
+
+    /**
+     * Runs [read] on whichever of [hosts] (replicas of one shard, `host:port`) is admitted first;
+     * [read] receives the chosen host. Without a guard, the first preferred host is used.
+     */
+    fun <T> withPermitOnAny(
+        hosts: List<String>,
+        queryId: String,
+        read: (host: String, cancellation: chrepl.clickhouse.Cancellation) -> T,
+    ): T {
+        val host = preferred(hosts).first()
+        return withPermit(host, queryId) { read(host, it) }
+    }
 }
 
 /** The guard stopped a read (SPEC §4.5); the chunk is retried and nothing partial is published. */

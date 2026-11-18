@@ -1,13 +1,18 @@
 # Demo configuration (generated from docs/examples/replicator.yaml for demo/docker-compose.yml).
-# One DR replica ("dr"), the "prod" replica on the active-DC deny-list, one target ("qa1"), plain
-# HTTP inside the demo network, fast guard timings and host thresholds relaxed for a laptop.
+# The physical layout in miniature: DR replicas dr1-3 (and their Keepers) as the source, prod1-3 on
+# the active-DC deny-list, qa1 as 1 shard x 3 replicas; plain HTTP inside the demo network, fast
+# guard timings and host thresholds relaxed for a laptop.
 version: 1
 active_dc:
   name: demo-prod
   hosts:
-  - prod
+  - prod1
+  - prod2
+  - prod3
   cidrs:
-  - 172.28.0.10/32
+  - 172.28.0.11/32
+  - 172.28.0.12/32
+  - 172.28.0.13/32
 sources:
   dr:
     dc: dr
@@ -22,8 +27,16 @@ sources:
       password: ${file:/var/run/secrets/chrepl/dr-guard-password}
     shards:
     - name: s1
-      host: dr:8123
-    fail_closed_scope: cluster
+      replicas:
+      - dr1:8123
+      - dr2:8123
+      - dr3:8123
+    fail_closed_scope: replica
+    keeper:
+      hosts:
+      - dr1:9181
+      - dr2:9181
+      - dr3:9181
     dc_role_check:
       foreign_activity: true
       ignored_users:
@@ -31,15 +44,19 @@ sources:
 targets:
   qa1:
     hosts:
-    - qa1:8123
+    - qa1-1:8123
+    - qa1-2:8123
+    - qa1-3:8123
     cluster_name: qa1
     shards: 1
+    replicas: 3
     shard_mapping: single
     tls: false
     writer:
       user: repl_writer
       password: ${file:/var/run/secrets/chrepl/qa1-writer-password}
     environment_marker: qa1
+    zookeeper_path_template: /clickhouse/qa1/tables/{shard}/{database}/{table}
     recent_copy_warning: 24h
 guard:
   poll_interval: 2s
@@ -61,6 +78,9 @@ guard:
     background:
       max_active_merges: 10
       max_mutation_bytes: 50GiB
+    keeper:
+      max_avg_latency: 500ms
+      max_outstanding_requests: 100
   concurrency:
     global: 2
     per_host: 1

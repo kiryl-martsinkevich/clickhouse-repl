@@ -91,7 +91,8 @@ class GuardIT {
                 .getValue("dr")
                 .shards
                 .single()
-                .host,
+                .hosts
+                .single(),
             false,
         )
 

@@ -59,7 +59,9 @@ networkPolicy:
   enabled: true
   dns: { namespace: kube-system, port: 53 }
   egress:
-    drReplicas: [{ cidr: 10.20.0.0/24, ports: [8443] }]
+    # Every DR replica: ClickHouse HTTPS, and the Keeper client port the guard polls with `mntr`
+    # (sources.*.keeper; 9281 if the Keeper uses TLS).
+    drReplicas: [{ cidr: 10.20.0.0/24, ports: [8443, 9181] }]
     targets: [{ cidr: 10.30.0.0/24, ports: [8443] }]
     postgres: [{ cidr: 10.40.0.10/32, ports: [5432] }]
     oidc: [{ cidr: 10.50.0.20/32, ports: [443] }]

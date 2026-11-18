@@ -108,6 +108,7 @@ class ReplicatedTopology : AutoCloseable {
             ((get("active_dc") as ObjectNode).get("hosts") as ArrayNode).add("127.0.0.42") // prod
             val source = child("sources").child("dr")
             source.put("dc", "dr")
+            source.remove("keeper")
             source
                 .putArray("shards")
                 .addObject()

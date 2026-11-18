@@ -1,41 +1,83 @@
-# clickhouse-repl demo: "prod" and "DR" replicas (ReplicatedMergeTree via Keeper), a qa1 target,
-# Postgres, a development-only OIDC provider and the app. See demo/run.sh. Not for production.
+# clickhouse-repl demo, laid out like the physical clusters it is built for:
+#   prod1-3 + dr1-3   one shard, 6 replicas (ReplicatedMergeTree), Keeper on every machine (one ensemble;
+#                     DR Keepers cannot lead)
+#   qa1-1..3          the non-production target: one shard, 3 replicas, its own Keepers
+# plus Postgres, a development-only OIDC provider and the app. See demo/run.sh. Not for production.
 name: chrepl-demo
+
+x-clickhouse-env: &chenv
+  CLICKHOUSE_SKIP_USER_SETUP: "1"
+  CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
 
 x-clickhouse: &clickhouse
   image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:25.8}
-  environment:
-    CLICKHOUSE_SKIP_USER_SETUP: "1"
-    CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
 
 services:
-  keeper:
+  # The ACTIVE data centre (3 replicas + Keepers). The tool must never connect here: these hosts are on the active-DC deny-list.
+  prod1:
     <<: *clickhouse
-    hostname: keeper
-    volumes: ["./clickhouse/keeper.xml:/etc/clickhouse-server/config.d/demo.xml:ro"]
-    networks: { demo: { ipv4_address: 172.28.0.5 } }
+    hostname: prod1
+    environment: { <<: *chenv, KEEPER_ID: "1", REPLICA: prod1 }
+    volumes: ["./clickhouse/prod-dr-keeper.xml:/etc/clickhouse-server/config.d/prod-dr-keeper.xml:ro", "./clickhouse/prod.xml:/etc/clickhouse-server/config.d/prod.xml:ro"]
+    networks: { demo: { ipv4_address: 172.28.0.11 } }
 
-  # The ACTIVE data centre. The tool must never connect here: it is on the active-DC deny-list.
-  prod:
+  prod2:
     <<: *clickhouse
-    hostname: prod
-    depends_on: [keeper]
-    volumes: ["./clickhouse/prod.xml:/etc/clickhouse-server/config.d/demo.xml:ro"]
-    networks: { demo: { ipv4_address: 172.28.0.10 } }
+    hostname: prod2
+    environment: { <<: *chenv, KEEPER_ID: "2", REPLICA: prod2 }
+    volumes: ["./clickhouse/prod-dr-keeper.xml:/etc/clickhouse-server/config.d/prod-dr-keeper.xml:ro", "./clickhouse/prod.xml:/etc/clickhouse-server/config.d/prod.xml:ro"]
+    networks: { demo: { ipv4_address: 172.28.0.12 } }
 
-  # The PASSIVE DR replica: the tool's only source.
-  dr:
+  prod3:
     <<: *clickhouse
-    hostname: dr
-    depends_on: [keeper]
-    volumes: ["./clickhouse/dr.xml:/etc/clickhouse-server/config.d/demo.xml:ro"]
-    networks: { demo: { ipv4_address: 172.28.0.20 } }
+    hostname: prod3
+    environment: { <<: *chenv, KEEPER_ID: "3", REPLICA: prod3 }
+    volumes: ["./clickhouse/prod-dr-keeper.xml:/etc/clickhouse-server/config.d/prod-dr-keeper.xml:ro", "./clickhouse/prod.xml:/etc/clickhouse-server/config.d/prod.xml:ro"]
+    networks: { demo: { ipv4_address: 172.28.0.13 } }
 
-  # A shared non-production target.
-  qa1:
+  # The PASSIVE DR data centre (3 replicas of the same shard + Keepers that cannot lead): the tool's only source.
+  dr1:
     <<: *clickhouse
-    hostname: qa1
-    networks: { demo: { ipv4_address: 172.28.0.30 } }
+    hostname: dr1
+    environment: { <<: *chenv, KEEPER_ID: "4", REPLICA: dr1 }
+    volumes: ["./clickhouse/prod-dr-keeper.xml:/etc/clickhouse-server/config.d/prod-dr-keeper.xml:ro", "./clickhouse/dr.xml:/etc/clickhouse-server/config.d/dr.xml:ro"]
+    networks: { demo: { ipv4_address: 172.28.0.21 } }
+
+  dr2:
+    <<: *clickhouse
+    hostname: dr2
+    environment: { <<: *chenv, KEEPER_ID: "5", REPLICA: dr2 }
+    volumes: ["./clickhouse/prod-dr-keeper.xml:/etc/clickhouse-server/config.d/prod-dr-keeper.xml:ro", "./clickhouse/dr.xml:/etc/clickhouse-server/config.d/dr.xml:ro"]
+    networks: { demo: { ipv4_address: 172.28.0.22 } }
+
+  dr3:
+    <<: *clickhouse
+    hostname: dr3
+    environment: { <<: *chenv, KEEPER_ID: "6", REPLICA: dr3 }
+    volumes: ["./clickhouse/prod-dr-keeper.xml:/etc/clickhouse-server/config.d/prod-dr-keeper.xml:ro", "./clickhouse/dr.xml:/etc/clickhouse-server/config.d/dr.xml:ro"]
+    networks: { demo: { ipv4_address: 172.28.0.23 } }
+
+  # The shared non-production target qa1: 1 shard x 3 replicas with its own Keepers.
+  qa1-1:
+    <<: *clickhouse
+    hostname: qa1-1
+    environment: { <<: *chenv, KEEPER_ID: "1", REPLICA: qa1-1 }
+    volumes: ["./clickhouse/qa1.xml:/etc/clickhouse-server/config.d/qa1.xml:ro"]
+    networks: { demo: { ipv4_address: 172.28.0.31 } }
+
+  qa1-2:
+    <<: *clickhouse
+    hostname: qa1-2
+    environment: { <<: *chenv, KEEPER_ID: "2", REPLICA: qa1-2 }
+    volumes: ["./clickhouse/qa1.xml:/etc/clickhouse-server/config.d/qa1.xml:ro"]
+    networks: { demo: { ipv4_address: 172.28.0.32 } }
+
+  qa1-3:
+    <<: *clickhouse
+    hostname: qa1-3
+    environment: { <<: *chenv, KEEPER_ID: "3", REPLICA: qa1-3 }
+    volumes: ["./clickhouse/qa1.xml:/etc/clickhouse-server/config.d/qa1.xml:ro"]
+    networks: { demo: { ipv4_address: 172.28.0.33 } }
 
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:16}

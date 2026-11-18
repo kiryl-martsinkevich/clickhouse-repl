@@ -30,7 +30,7 @@ export function GuardPage() {
           </div>
           {Object.keys(data.hosts).length > 0 && (
             <table>
-              <caption>DR hosts</caption>
+              <caption>DR replicas</caption>
               <thead>
                 <tr>
                   <th scope="col">Host</th>
@@ -42,6 +42,31 @@ export function GuardPage() {
                   <tr key={host}>
                     <td>{host}</td>
                     <td>{level}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {data.keepers && Object.keys(data.keepers).length > 0 && (
+            <table>
+              <caption>DR Keeper nodes (shared with production)</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Node</th>
+                  <th scope="col">Level</th>
+                  <th scope="col">Role</th>
+                  <th scope="col">Average latency</th>
+                  <th scope="col">Outstanding requests</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(data.keepers).map(([host, k]) => (
+                  <tr key={host}>
+                    <td>{host}</td>
+                    <td>{k.level}</td>
+                    <td>{k.state ?? "—"}</td>
+                    <td>{k.avg_latency_ms == null ? "—" : `${k.avg_latency_ms} ms`}</td>
+                    <td>{k.outstanding_requests ?? "—"}</td>
                   </tr>
                 ))}
               </tbody>

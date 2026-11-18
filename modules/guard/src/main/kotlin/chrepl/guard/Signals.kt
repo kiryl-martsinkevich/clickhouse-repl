@@ -112,3 +112,85 @@ class ClickHouseSignalSource(
             """.trimIndent()
     }
 }
+
+/** One `mntr` poll of a DR Keeper node (SPEC §4.4). A failed poll has [error] set. */
+data class KeeperSample(
+    val host: String,
+    val takenAt: Instant,
+    val error: String? = null,
+    /** `zk_server_state`: leader, follower, observer or standalone. */
+    val state: String? = null,
+    val avgLatencyMs: Double = 0.0,
+    val outstandingRequests: Long = 0,
+) {
+    val ok: Boolean get() = error == null
+}
+
+fun interface KeeperSource {
+    /** Never throws: failures are returned as a sample with [KeeperSample.error]. */
+    fun sample(host: String): KeeperSample
+}
+
+/** The key the guard uses for a Keeper node: `host:port` with Keeper's default client port. */
+fun keeperKey(
+    host: chrepl.config.model.HostPort,
+    tls: Boolean,
+): String = "${host.host}:${host.port ?: if (tls) 9281 else 9181}"
+
+/**
+ * Polls DR Keeper nodes with the `mntr` four-letter command over TCP: read-only, no session, no
+ * Keeper write. Never contacts any other host.
+ */
+class MntrKeeperSource(
+    private val tls: Boolean,
+    private val timeout: java.time.Duration = java.time.Duration.ofSeconds(3),
+    private val clock: () -> Instant = Instant::now,
+) : KeeperSource {
+    override fun sample(host: String): KeeperSample {
+        val now = clock()
+        return try {
+            val values = parse(mntr(host))
+            KeeperSample(
+                host = host,
+                takenAt = now,
+                state = values["zk_server_state"],
+                avgLatencyMs = values["zk_avg_latency"]?.toDoubleOrNull() ?: 0.0,
+                outstandingRequests = values["zk_outstanding_requests"]?.toLongOrNull() ?: 0,
+            ).also { if (it.state == null) return KeeperSample(host, now, error = "no zk_server_state in mntr output") }
+        } catch (e: Exception) {
+            KeeperSample(host, now, error = e.message ?: e::class.simpleName)
+        }
+    }
+
+    private fun mntr(host: String): String {
+        val name = host.substringBeforeLast(':')
+        val port = host.substringAfterLast(':').toInt()
+        val socket =
+            if (tls) {
+                javax.net.ssl.SSLSocketFactory
+                    .getDefault()
+                    .createSocket()
+            } else {
+                java.net.Socket()
+            }
+        socket.use {
+            it.connect(java.net.InetSocketAddress(name, port), timeout.toMillis().toInt())
+            it.soTimeout = timeout.toMillis().toInt()
+            it.getOutputStream().apply {
+                write("mntr".toByteArray())
+                flush()
+            }
+            return it.getInputStream().readNBytes(64 * 1024).toString(Charsets.UTF_8)
+        }
+    }
+
+    companion object {
+        fun parse(text: String): Map<String, String> =
+            text
+                .lineSequence()
+                .mapNotNull { line ->
+                    val parts = line.trim().split('\t', ' ').filter { it.isNotEmpty() }
+                    if (parts.size >= 2) parts[0] to parts[1] else null
+                }.toMap()
+    }
+}

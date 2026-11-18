@@ -38,6 +38,16 @@ class GuardMetrics(
                 "chrepl_dr_replication_queue",
             ).description("DR replication queue size per host")
             .register(registry)
+    private val keeperLevel =
+        MultiGauge.builder("chrepl_keeper_state").description("Guard level per DR Keeper node (same scale)").register(registry)
+    private val keeperLatency =
+        MultiGauge.builder("chrepl_keeper_avg_latency_ms").description("zk_avg_latency per DR Keeper node").register(registry)
+    private val keeperOutstanding =
+        MultiGauge
+            .builder(
+                "chrepl_keeper_outstanding_requests",
+            ).description("zk_outstanding_requests per DR Keeper node")
+            .register(registry)
     private val reasons = MultiGauge.builder("chrepl_guard_block_reasons").description("Active blocking reasons by code").register(registry)
     private val depth = MultiGauge.builder("chrepl_queue_depth").description("Active jobs per queue").register(registry)
 
@@ -59,6 +69,17 @@ class GuardMetrics(
             delay.register(
                 status.hostSignals.map { (host, s) ->
                     MultiGauge.Row.of(Tags.of("host", host), s.replicaDelaySeconds.toDouble())
+                },
+                true,
+            )
+            keeperLevel.register(status.keepers.map { (host, k) -> MultiGauge.Row.of(Tags.of("host", host), k.level.ordinal()) }, true)
+            keeperLatency.register(
+                status.keepers.mapNotNull { (host, k) -> k.avgLatencyMs?.let { MultiGauge.Row.of(Tags.of("host", host), it) } },
+                true,
+            )
+            keeperOutstanding.register(
+                status.keepers.mapNotNull { (host, k) ->
+                    k.outstandingRequests?.let { MultiGauge.Row.of(Tags.of("host", host), it.toDouble()) }
                 },
                 true,
             )

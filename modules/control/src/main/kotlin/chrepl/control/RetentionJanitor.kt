@@ -29,12 +29,12 @@ class RetentionJanitor(
             val session = runtime.session(version, name) { _, _ -> }
             for (spec in config.tables.filter { it.cobColumn != null && !it.fullCopy }) {
                 val (database, table) = spec.source.split('.', limit = 2)
-                for (client in session.targetClients) {
+                for ((index, client) in session.targetClients.withIndex()) {
                     if (client.queryScalar("EXISTS TABLE ${Sql.ident(database)}.${Sql.ident(table)}") != "1") continue
                     TargetMeta.checkMarker(client, name)
                     val expired = SourceMetadata.partitions(client, database, table).filter { it.maxDate != null && it.maxDate < cutoff }
                     for (partition in expired) {
-                        runtime.locks.withLock("${client.endpoint}/$database.$table/${partition.id}") {
+                        runtime.locks.withLock("${session.lockScope(index)}/$database.$table/${partition.id}") {
                             client.execute("ALTER TABLE ${Sql.table(spec.source)} DROP PARTITION ID ${Sql.string(partition.id)}")
                         }
                         dropped += "$name/${spec.source}/${partition.id}"

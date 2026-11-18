@@ -26,11 +26,11 @@ class CliTest {
     @Test
     fun `active-DC host exits 1 and names the rule`() {
         val broken = dir.resolve("broken.yaml")
-        broken.writeText(example.readText().replace("host: ch-dr-s1.dc-dr.internal:8443", "host: ch-prod-s1.dc-prod.internal:8443"))
+        broken.writeText(example.readText().replace("- ch-dr-1.dc-dr.internal:8443", "- ch-prod-1.dc-prod.internal:8443"))
         val result = cli().test(listOf("validate-config", broken.toString()))
         assertEquals(ExitCodes.INVALID, result.statusCode, result.output)
         assertContains(result.output, "ACTIVE_DC_HOST")
-        assertContains(result.output, "sources.dr.shards[0].host")
+        assertContains(result.output, "sources.dr.shards[0].replicas[0]")
         assertContains(result.output, "invalid (1 error, 0 warnings)")
     }
 

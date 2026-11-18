@@ -13,8 +13,8 @@ object GuardFactory {
         flags: OpsFlags = InMemoryOpsFlags(),
     ): SourceGuard {
         val guardClients =
-            source.shards.associate { shard ->
-                hostKey(shard.host, source.tls) to clients.create(shard.host, source.tls, source.guard.user, source.guard.password)
+            source.shards.flatMap { it.hosts }.associate { host ->
+                hostKey(host, source.tls) to clients.create(host, source.tls, source.guard.user, source.guard.password)
             }
         return SourceGuard(
             config = guard,
@@ -22,6 +22,7 @@ object GuardFactory {
             signals = ClickHouseSignalSource(guardClients),
             flags = flags,
             killer = QueryKiller(guardClients, source.reader.user),
+            keeperSignals = source.keeper?.let { MntrKeeperSource(it.tls) },
         )
     }
 }

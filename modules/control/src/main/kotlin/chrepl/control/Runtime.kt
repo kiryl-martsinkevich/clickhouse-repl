@@ -103,39 +103,48 @@ class DbReadTokens(
         var reported = false
         val deadline = System.nanoTime() + maxWait.toNanos()
         while (true) {
-            val limits = guard().concurrency
-            val granted =
-                db.tx {
-                    exec("SELECT pg_advisory_xact_lock(7319)")
-                    update("DELETE FROM read_tokens WHERE lease_until < now()")
-                    val total = long("SELECT count(*) FROM read_tokens")
-                    val onHost = long("SELECT count(*) FROM read_tokens WHERE host = ?", host)
-                    if (total < limits.global && onHost < limits.perHost) {
-                        update(
-                            "INSERT INTO read_tokens (query_id, host, holder, lease_until) VALUES (?, ?, ?, now() + make_interval(secs => ?))",
-                            queryId,
-                            host,
-                            holder,
-                            lease.seconds.toDouble(),
-                        )
-                        true
-                    } else {
-                        false
-                    }
-                }
-            if (granted) return
+            if (tryAcquire(host, queryId)) return
             if (System.nanoTime() >
                 deadline
             ) {
                 throw GuardTimeoutException(listOf(Reason("NO_READ_SLOT", host, "no read slot within $maxWait")))
             }
             if (!reported) {
-                onWait("waiting for a read slot (limits: ${limits.global} total, ${limits.perHost} per DR host)")
+                onWait(waitMessage())
                 reported = true
             }
             Thread.sleep(500)
         }
     }
+
+    /** Takes a token for [host] if the limits allow it now; never waits. */
+    fun tryAcquire(
+        host: String,
+        queryId: String,
+    ): Boolean {
+        val limits = guard().concurrency
+        return db.tx {
+            exec("SELECT pg_advisory_xact_lock(7319)")
+            update("DELETE FROM read_tokens WHERE lease_until < now()")
+            val total = long("SELECT count(*) FROM read_tokens")
+            val onHost = long("SELECT count(*) FROM read_tokens WHERE host = ?", host)
+            if (total < limits.global && onHost < limits.perHost) {
+                update(
+                    "INSERT INTO read_tokens (query_id, host, holder, lease_until) VALUES (?, ?, ?, now() + make_interval(secs => ?))",
+                    queryId,
+                    host,
+                    holder,
+                    lease.seconds.toDouble(),
+                )
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    fun waitMessage(): String =
+        guard().concurrency.let { "waiting for a read slot (limits: ${it.global} total, ${it.perHost} per DR host)" }
 
     fun renew(queryId: String) {
         db.tx {
@@ -264,15 +273,11 @@ class Runtime(
         onWait: (String, String) -> Unit,
         maxWait: Duration = guardWait,
     ): ReadGate {
+        val guarded = if (unguarded) null else guard ?: error("no Source Guard in this process")
         val inner: ReadGate =
-            if (unguarded) {
-                UnguardedGate
-            } else {
-                GuardGate(
-                    guard ?: error("no Source Guard in this process"),
-                    maxWait,
-                ) { q, reasons -> onWait(q, reasons.joinToString("; ")) }
-            }
+            guarded?.let { GuardGate(it, maxWait) { q, reasons -> onWait(q, reasons.joinToString("; ")) } } ?: UnguardedGate
+        // Used once a replica looked admissible: a short wait, so a replica that turned RED meanwhile does not hold the chunk.
+        val quick: ReadGate = guarded?.let { GuardGate(it, Duration.ofSeconds(2)) } ?: UnguardedGate
         return object : ReadGate {
             override fun <T> withPermit(
                 host: String,
@@ -281,19 +286,63 @@ class Runtime(
             ): T {
                 tokens.acquire(host, queryId, maxWait) { onWait(queryId, it) }
                 try {
-                    return inner.withPermit(host, queryId) { cancellation ->
-                        running[queryId] = cancellation
-                        try {
-                            beforeRead(queryId)
-                            read(cancellation)
-                        } finally {
-                            running.remove(queryId)
-                        }
-                    }
+                    return inner.withPermit(host, queryId) { cancellation -> track(queryId, cancellation) { read(cancellation) } }
                 } finally {
                     tokens.release(queryId)
                 }
             }
+
+            override fun preferred(hosts: List<String>): List<String> = inner.preferred(hosts)
+
+            /** Replicas of one shard: the first admissible one (best first) with a free cluster-wide token reads. */
+            override fun <T> withPermitOnAny(
+                hosts: List<String>,
+                queryId: String,
+                read: (host: String, cancellation: Cancellation) -> T,
+            ): T {
+                if (hosts.size == 1) return withPermit(hosts.single(), queryId) { read(hosts.single(), it) }
+                val deadline = System.nanoTime() + maxWait.toNanos()
+                var reported: String? = null
+                while (true) {
+                    for (host in inner.preferred(hosts)) {
+                        if (guarded != null && !guarded.admissible(host)) continue
+                        if (!tokens.tryAcquire(host, queryId)) continue
+                        try {
+                            return quick.withPermit(host, queryId) { c -> track(queryId, c) { read(host, c) } }
+                        } catch (_: GuardTimeoutException) {
+                            // Not admissible any more: try the next replica.
+                        } finally {
+                            tokens.release(queryId)
+                        }
+                    }
+                    val reasons = guarded?.waitReasons(hosts).orEmpty()
+                    if (System.nanoTime() > deadline) {
+                        throw GuardTimeoutException(
+                            reasons.ifEmpty { listOf(Reason("NO_READ_SLOT", null, "no read slot within $maxWait")) },
+                        )
+                    }
+                    val why = reasons.joinToString("; ").ifEmpty { tokens.waitMessage() }
+                    if (why != reported) {
+                        onWait(queryId, why)
+                        reported = why
+                    }
+                    Thread.sleep(500)
+                }
+            }
+        }
+    }
+
+    private fun <T> track(
+        queryId: String,
+        cancellation: Cancellation,
+        read: () -> T,
+    ): T {
+        running[queryId] = cancellation
+        try {
+            beforeRead(queryId)
+            return read()
+        } finally {
+            running.remove(queryId)
         }
     }
 

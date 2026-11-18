@@ -8,8 +8,9 @@ environments (QA, UAT, perf), with consistent masking of sensitive columns.
 - **Continuous mode**: keeps a configured set of tables near-real-time in sync.
 - **Ad-hoc mode**: QA users request a table or dataset for a COB date from a web portal, and the job runs in the background.
 - **Production first**: reads come only from the passive DR datacentre — the active DC is never contacted. A Source Guard admits reads only while DR replication is healthy, pre-empts them when it falls behind, stops immediately if DR becomes active, and fails closed.
+- **Built for physical clusters**: prod and DR as replicas of one cluster with Keeper on the same machines, replicated non-production targets, and copies triggered from the portal, the CLI or any system that can call the REST API.
 
-Status: every milestone of the [plan](docs/PLAN.md) is implemented (M0–M8). Items that need people or a
+Status: every milestone of the [plan](docs/PLAN.md) is implemented (M0–M9). Items that need people or a
 staging environment are listed there as open: the staging load test and sign-off, the failover drill,
 the pen test, and the run against a real Fortanix DSM tenant.
 
@@ -72,6 +73,34 @@ queries on prod by repl_* users: 0
 Then open the portal at http://localhost:8080 and sign in as `alice`, `bob` (QA), `olga`
 (operator) or `root` (admin) on the dev sign-in page.
 
+## Cluster layout
+
+The typical deployment, and what the [example configuration](docs/examples/replicator.yaml), the
+demo and `ClusterIT` use:
+
+```text
+          active DC (prod)                    passive DC (DR)                 non-production
+  ┌───────────┬───────────┬───────────┐ ┌──────────┬──────────┬──────────┐ ┌──────────┬──────────┬──────────┐
+  │ ch-prod-1 │ ch-prod-2 │ ch-prod-3 │ │ ch-dr-1  │ ch-dr-2  │ ch-dr-3  │ │ ch-qa1-1 │ ch-qa1-2 │ ch-qa1-3 │
+  │ + Keeper  │ + Keeper  │ + Keeper  │ │ + Keeper │ + Keeper │ + Keeper │ │ + Keeper │ + Keeper │ + Keeper │
+  └───────────┴───────────┴───────────┘ └──────────┴──────────┴──────────┘ └──────────┴──────────┴──────────┘
+   one shard, 6 replicas (ReplicatedMergeTree); one Keeper ensemble:        one shard, 3 replicas,
+   DR Keepers have can_become_leader=false (non-voting learners)            its own Keeper ensemble
+                 never contacted ✗          read + watched ✓                         written ✓
+```
+
+- **Source**: one shard listing its three DR replicas. Every replica is polled by the Source Guard,
+  and each chunk is read from a healthy one. With `fail_closed_scope: replica`, a replica that lags
+  is skipped while the others serve reads.
+- **Keeper**: the guard polls each DR Keeper with the read-only `mntr` command. A slow or
+  unreachable DR Keeper stops every read, and a DR Keeper leading the ensemble means failover
+  (DR_ACTIVE). Prod writes do not depend on DR Keepers, which are learners.
+- **Target**: `replicas: 3` with a `zookeeper_path_template`. Tables are created on every replica;
+  data is written once, through the first healthy replica, and replicated by the target's own Keepers.
+- Sharded layouts (`shards` with one `host` each, `same_shards` targets) remain supported.
+
+Details: [SPEC §4.9 and §5.6](docs/SPEC.md#49-physical-clusters-dr-replicas-and-a-shared-keeper-m9).
+
 ## Build
 
 Requires JDK 21. The Gradle wrapper downloads Gradle itself.
@@ -123,7 +152,7 @@ Settings: `chrepl.portal.issuer` (the OIDC issuer the browser signs in with), `c
 - `Dockerfile`: minimal Chainguard JRE runtime image (non-root, no known CVEs; see [SECURITY.md](SECURITY.md)). Build the jar first with `./gradlew :app:bootJar`.
 - `deploy/helm/clickhouse-repl`:
   - one Deployment per role (`api`, `worker`, `scheduler`), with PodDisruptionBudgets;
-  - a deny-by-default egress NetworkPolicy: DR replicas, targets, Postgres, OIDC and the key store only;
+  - a deny-by-default egress NetworkPolicy: DR replicas (ClickHouse and Keeper ports), targets, Postgres, OIDC and the key store only;
   - actuator on a management port that the Ingress does not expose.
 - `deploy/monitoring`: Grafana dashboard and Prometheus alert rules (`promtool test rules alerts.test.yaml`).
 - `deploy/dr-ddl.sql` and `deploy/dr-users.d/`: DR users, profiles, quotas and workload scheduling. `deploy/target-ddl.sql`: target marker and writer.
@@ -143,6 +172,39 @@ clickhouse-repl cancel <job-id>
 `--json` prints raw API responses. Exit codes: `0` ok, `1` the job did not succeed (`--wait`),
 `3` the request was rejected (the server's reason is printed), `4` the API is unreachable.
 
+## Trigger copies through the API
+
+Any system that can send an HTTP request (a CI pipeline, a test harness, a scheduler) triggers a
+copy with the same call the portal and CLI make. It needs a bearer token for a user or service
+account whose OIDC groups grant `requester` on the dataset or tables and target (config `access`).
+
+```bash
+API=https://chrepl.internal
+TOKEN=$(get-my-oidc-token)   # e.g. a client-credentials token for a service account
+
+# Estimate first (optional): sizes, queue position, who last replaced the slice.
+curl -fsS -X POST "$API/api/v1/estimates" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"dataset": "trading-eod", "cob": {"dates": ["2026-10-19"]}, "target": "qa1"}'
+
+# Submit. The Idempotency-Key makes a retried call return the same job instead of starting another.
+curl -fsS -X POST "$API/api/v1/jobs" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: nightly-qa1-2026-10-19" \
+  -d '{"dataset": "trading-eod", "cob": {"dates": ["2026-10-19"]}, "target": "qa1", "mode": "replace"}'
+# → {"id":"jb2cbf33aa31b43e9","state":"PENDING",...}
+
+# Tables instead of a dataset, and a COB range; skip partitions already on the target.
+curl -fsS -X POST "$API/api/v1/jobs" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tables": ["trading.trades"], "cob": {"from": "2026-10-01", "to": "2026-10-09"}, "target": "qa1", "mode": "skip_if_present"}'
+
+# Follow it until state is SUCCEEDED, FAILED, CANCELLED or BLOCKED (wait_reason explains any waiting).
+curl -fsS "$API/api/v1/jobs/jb2cbf33aa31b43e9" -H "Authorization: Bearer $TOKEN"
+```
+
+Errors are `{"error": code, "message": …}`. A `409 confirm_overwrite_recent` means someone else
+replaced the same slice recently: resubmit with `"confirm_overwrite_recent": true` if that is
+intended. `422 quota` means the request exceeds the group's quota. The full API is described by
+the OpenAPI document at `/v3/api-docs` and in [SPEC §7.5](docs/SPEC.md#75-rest-api-v1).
+
 ## Validate a configuration
 
 ```bash
@@ -161,7 +223,7 @@ Checks are offline by default, which suits CI. Optional flags:
 
 Exit codes: `0` valid (warnings allowed), `1` invalid, `2` the configuration cannot be read.
 Every issue carries a stable code (e.g. `ACTIVE_DC_HOST`, `UNCLASSIFIED_COLUMNS`) and a path
-into the config (e.g. `sources.dr.shards[0].host`).
+into the config (e.g. `sources.dr.shards[0].replicas[1]`).
 
 ## Layout
 

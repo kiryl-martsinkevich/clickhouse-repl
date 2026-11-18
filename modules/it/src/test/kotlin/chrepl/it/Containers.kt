@@ -34,6 +34,8 @@ class ClickHouseNode(
     val bindAddress: String,
     private val network: String? = null,
     private val extraArgs: List<String> = emptyList(),
+    /** Publish on port 8123 of [bindAddress] itself, so the address stays the same across `docker stop`/`start`. */
+    private val fixedPort: Boolean = false,
 ) : AutoCloseable {
     private val containerName = "chrepl-it-$name-${UUID.randomUUID().toString().take(6)}"
     lateinit var containerId: String
@@ -49,7 +51,7 @@ class ClickHouseNode(
                 "--name",
                 containerName,
                 "-p",
-                "$bindAddress::8123",
+                if (fixedPort) "$bindAddress:8123:8123" else "$bindAddress::8123",
                 "-e",
                 "CLICKHOUSE_SKIP_USER_SETUP=1",
                 "-e",

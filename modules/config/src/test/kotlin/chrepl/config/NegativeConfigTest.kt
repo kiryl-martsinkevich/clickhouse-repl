@@ -35,7 +35,7 @@ class NegativeConfigTest {
         private val dnsWithActiveDcTarget =
             ValidationOptions(
                 resolveDns = true,
-                hostResolver = Fixtures.resolver(mapOf("ch-qa1-s1.nonprod.internal" to "10.10.4.20")),
+                hostResolver = Fixtures.resolver(mapOf("ch-qa1-1.nonprod.internal" to "10.10.4.20")),
             )
 
         @JvmStatic
@@ -51,8 +51,11 @@ class NegativeConfigTest {
                 Case("masked column in partition key", Code.PARTITION_KEY_MASKED, "tables[0].columns.customer_id") {
                     obj("/tables/0").put("partition_key", "(toYYYYMM(trade_date), customer_id)")
                 },
-                Case("source host in active_dc.hosts", Code.ACTIVE_DC_HOST, "sources.dr.shards[0].host") {
-                    obj("/sources/dr/shards/0").put("host", "ch-prod-s1.dc-prod.internal:8443")
+                Case("source host in active_dc.hosts", Code.ACTIVE_DC_HOST, "sources.dr.shards[0].replicas[0]") {
+                    arr("/sources/dr/shards/0/replicas").set(0, textNode("ch-prod-1.dc-prod.internal:8443"))
+                },
+                Case("DR Keeper node in active_dc.hosts", Code.ACTIVE_DC_HOST, "sources.dr.keeper.hosts[2]") {
+                    arr("/sources/dr/keeper/hosts").set(2, textNode("ch-prod-3.dc-prod.internal:9181"))
                 },
                 Case(
                     "target host resolving into active_dc.cidrs",
@@ -85,12 +88,32 @@ class NegativeConfigTest {
                 Case("IP literal target inside active-DC CIDR", Code.ACTIVE_DC_CIDR, "targets.uat.hosts[0]") {
                     arr("/targets/uat/hosts").set(0, textNode("10.10.9.9:8443"))
                 },
-                Case("unresolvable host with DNS checks", Code.DNS_UNRESOLVED, "sources.dr.shards[1].host", options = unresolvable()) {},
+                Case(
+                    "unresolvable host with DNS checks",
+                    Code.DNS_UNRESOLVED,
+                    "sources.dr.shards[0].replicas[1]",
+                    options = unresolvable(),
+                ) {},
                 Case("target pointing at a DR node", Code.TARGET_IS_SOURCE, "targets.uat.hosts[0]") {
-                    arr("/targets/uat/hosts").set(0, textNode("ch-dr-s2.dc-dr.internal:8443"))
+                    arr("/targets/uat/hosts").set(0, textNode("ch-dr-2.dc-dr.internal:8443"))
                 },
-                Case("duplicate source host", Code.DUPLICATE_HOST, "sources.dr.shards[1].host") {
-                    obj("/sources/dr/shards/1").put("host", "ch-dr-s1.dc-dr.internal:8443")
+                Case("duplicate source host", Code.DUPLICATE_HOST, "sources.dr.shards[0].replicas[2]") {
+                    arr("/sources/dr/shards/0/replicas").set(2, textNode("ch-dr-1.dc-dr.internal:8443"))
+                },
+                Case("shard with both host and replicas", Code.SOURCE_SHARDS, "sources.dr.shards[0]") {
+                    obj("/sources/dr/shards/0").put("host", "ch-dr-9.dc-dr.internal:8443")
+                },
+                Case("shard with neither host nor replicas", Code.SOURCE_SHARDS, "sources.dr.shards[0]") {
+                    obj("/sources/dr/shards/0").remove("replicas")
+                },
+                Case("target replicas without a ZooKeeper path", Code.TARGET_HOSTS, "targets.qa1.zookeeper_path_template") {
+                    obj("/targets/qa1").remove("zookeeper_path_template")
+                },
+                Case("target hosts not shards × replicas", Code.TARGET_HOSTS, "targets.qa1.hosts") {
+                    arr("/targets/qa1/hosts").remove(2)
+                },
+                Case("keeper latency threshold zero", Code.GUARD_THRESHOLD, "guard.thresholds.keeper.max_avg_latency") {
+                    obj("/guard/thresholds/keeper").put("max_avg_latency", "0ms")
                 },
                 // --- sources and targets
                 Case("foreign-activity detection disabled", Code.DC_ROLE_CHECK_DISABLED, "sources.dr.dc_role_check.foreign_activity") {
@@ -114,7 +137,7 @@ class NegativeConfigTest {
                     obj("/targets").set<ObjectNode>("prod", qa1)
                 },
                 Case("same_shards with a different shard count", Code.SHARD_MAPPING, "targets.qa1.shard_mapping") {
-                    obj("/targets/qa1").put("shards", 2)
+                    obj("/targets/qa1").put("shard_mapping", "same_shards").put("shards", 2)
                 },
                 // --- masking
                 Case("Fortanix provider without its settings", Code.KEY_PROVIDER, "masking.key.fortanix") {
@@ -199,6 +222,7 @@ class NegativeConfigTest {
                     obj("/tables/2/columns/profile_json/json_paths").putObject("contact.fax").put("mask", "phone")
                 },
                 Case("masked sharding key with same_shards target", Code.SHARDING_KEY_MASKED, "tables[0].sharding_key", Severity.WARNING) {
+                    obj("/targets/qa1").put("shard_mapping", "same_shards")
                     obj("/tables/0").put("sharding_key", "cityHash64(customer_id)")
                 },
                 Case("COB column outside the partition key", Code.COB_NOT_IN_PARTITION_KEY, "tables[0].partition_key", Severity.WARNING) {
@@ -285,7 +309,7 @@ class NegativeConfigTest {
         private fun unresolvable() =
             ValidationOptions(
                 resolveDns = true,
-                hostResolver = { host -> if (host == "ch-dr-s2.dc-dr.internal") emptyList() else Fixtures.resolver().resolve(host) },
+                hostResolver = { host -> if (host == "ch-dr-2.dc-dr.internal") emptyList() else Fixtures.resolver().resolve(host) },
             )
     }
 }

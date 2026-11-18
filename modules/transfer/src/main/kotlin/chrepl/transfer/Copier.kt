@@ -1,6 +1,7 @@
 package chrepl.transfer
 
 import chrepl.clickhouse.ClickHouseClient
+import chrepl.clickhouse.ClickHouseException
 import chrepl.clickhouse.Sql
 import chrepl.config.model.TableSpec
 import chrepl.masking.table.TableMasker
@@ -69,7 +70,7 @@ object SourceQueries {
     }
 }
 
-/** Serialises REPLACE PARTITION per (target host, table, partition) (SPEC §5.4); Postgres advisory locks in M4. */
+/** Serialises REPLACE PARTITION per (target shard, table, partition) (SPEC §5.4); Postgres advisory locks in M4. */
 interface PartitionLocks {
     fun <T> withLock(
         key: String,
@@ -101,7 +102,8 @@ internal class ChunkCopier(
     /** Returns the number of rows written to [staging]. */
     fun copy(
         chunk: Chunk,
-        sourceClient: ClickHouseClient,
+        /** The shard's DR replicas by `host:port`; the gate picks the one to read from. */
+        sourceReplicas: Map<String, ClickHouseClient>,
         targetClient: ClickHouseClient,
         target: TableInfo,
         staging: String,
@@ -111,7 +113,8 @@ internal class ChunkCopier(
         targetClient.execute("DROP TABLE IF EXISTS ${Sql.ident(target.database)}.${Sql.ident(staging)}")
         targetClient.execute(DdlRewriter.forStaging(target.createStatement, target.database, staging))
         val read = SourceQueries.read(spec, columnNames, chunk)
-        return gate.withPermit(sourceClient.endpoint.toString(), queryId) { cancellation ->
+        return gate.withPermitOnAny(sourceReplicas.keys.toList(), queryId) { host, cancellation ->
+            val sourceClient = sourceReplicas.getValue(host)
             targetClient.insert("${Sql.ident(target.database)}.${Sql.ident(staging)}", columnNames) { writer ->
                 sourceClient.queryRows(
                     read.sql,
@@ -138,9 +141,13 @@ internal class ChunkCopier(
 internal class PartitionAssembler(
     private val spec: TableSpec,
     private val locks: PartitionLocks,
+    /** Pause before attempt n (1-based) of a statement that failed on a Keeper error. */
+    private val keeperBackoff: (attempt: Int) -> Long = { 2_000L * it },
 ) {
     fun assemble(
         targetClient: ClickHouseClient,
+        /** Identifies the target shard whichever replica writes (see [CopySession.lockScope]). */
+        lockScope: String,
         target: TableInfo,
         partitionId: String,
         selection: Selection,
@@ -154,7 +161,11 @@ internal class PartitionAssembler(
         try {
             targetClient.execute("DROP TABLE IF EXISTS $stg")
             targetClient.execute(DdlRewriter.forStaging(target.createStatement, target.database, staging))
-            return locks.withLock("${targetClient.endpoint}/${target.qualified}/$partitionId") {
+            return locks.withLock("$lockScope/${target.qualified}/$partitionId") {
+                if (selection is Selection.Cob && target.engine.startsWith("Replicated")) {
+                    // The rows kept from the partition are read locally: catch up with the other replicas first.
+                    keeperRetry { targetClient.execute("SYSTEM SYNC REPLICA $table") }
+                }
                 if (selection is Selection.Cob) {
                     val cob = Sql.ident(spec.cobColumn!!)
                     targetClient.execute(
@@ -168,12 +179,16 @@ internal class PartitionAssembler(
                         "SELECT count() FROM system.parts WHERE database = {db:String} AND table = {t:String} AND partition_id = {pid:String} AND active",
                         mapOf("param_db" to target.database, "param_t" to staging, "param_pid" to partitionId),
                     )
-                if (stagedParts == "0") {
-                    // Nothing left in the slice: empty the partition explicitly. ClickHouse 26.8 refuses REPLACE PARTITION
-                    // from an empty source (found in testing); DROP PARTITION is atomic too.
-                    targetClient.execute("ALTER TABLE $table DROP PARTITION ID $pid")
-                } else {
-                    targetClient.execute("ALTER TABLE $table REPLACE PARTITION ID $pid FROM $stg")
+                // Both statements give the same result when repeated, so a Keeper hiccup on a replicated
+                // target (e.g. a leader election) is retried instead of failing the job.
+                keeperRetry {
+                    if (stagedParts == "0") {
+                        // Nothing left in the slice: empty the partition explicitly. ClickHouse 26.8 refuses REPLACE PARTITION
+                        // from an empty source (found in testing); DROP PARTITION is atomic too.
+                        targetClient.execute("ALTER TABLE $table DROP PARTITION ID $pid")
+                    } else {
+                        targetClient.execute("ALTER TABLE $table REPLACE PARTITION ID $pid FROM $stg")
+                    }
                 }
                 targetClient
                     .queryScalar(
@@ -185,5 +200,24 @@ internal class PartitionAssembler(
         } finally {
             (chunkStagings + staging).forEach { runCatching { targetClient.execute("DROP TABLE IF EXISTS $db.${Sql.ident(it)}") } }
         }
+    }
+
+    private fun <T> keeperRetry(block: () -> T): T {
+        var attempt = 1
+        while (true) {
+            try {
+                return block()
+            } catch (e: ClickHouseException) {
+                if (e.code !in KEEPER_ERRORS || attempt >= KEEPER_ATTEMPTS) throw e
+                Thread.sleep(keeperBackoff(attempt))
+                attempt++
+            }
+        }
+    }
+
+    companion object {
+        /** KEEPER_EXCEPTION, TABLE_IS_READ_ONLY (Keeper session lost): transient on a replicated target. */
+        val KEEPER_ERRORS = setOf(999, 242)
+        const val KEEPER_ATTEMPTS = 7
     }
 }

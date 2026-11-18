@@ -54,7 +54,12 @@ What happens next:
 - All reads stop within one poll: the guard goes to DR_ACTIVE and pre-empts every read.
 - The flag is sticky. It survives restarts and stays set until an operator clears it.
 
-The guard also detects DR becoming active by itself and sets the same flag. It does this on any query from a user other than the tool's own on a DR host, or on inserts on DR (SPEC §4.6). The `ChreplDrActive` alert fires either way.
+The guard also detects DR becoming active by itself and sets the same flag. It does this on any query from a user other than the tool's own on a DR host, on inserts on DR (SPEC §4.6), or when a DR Keeper reports itself leader of the shared ensemble (SPEC §4.9). The `ChreplDrActive` alert fires either way.
+
+With the shared prod+DR Keeper ensemble, promoting DR includes reconfiguring Keeper so the DR
+Keepers can vote and lead (they are learners with `can_become_leader=false` while DR is passive).
+Set the flag **before** that step: the guard stops reads when it sees a DR Keeper lead, but only
+after the change has happened.
 
 **While failed over:**
 - The old DR is now production, so the tool must not read from it.
@@ -66,10 +71,11 @@ The guard also detects DR becoming active by itself and sets the same flag. It d
    - no application traffic;
    - `system.replicas` healthy on every DR replica.
 2. If the roles are swapped permanently (the old production side is now the passive side), change the configuration first:
-   - `sources.dr.shards[*].host` → the new passive replicas;
+   - `sources.dr.shards[*].replicas` (or `.host`) → the new passive replicas;
+   - `sources.dr.keeper.hosts` → the new passive side's Keepers, which must be learners again (`can_become_leader=false`);
    - `active_dc.hosts` / `cidrs` → the new active side;
    - provision the DR users (`deploy/dr-ddl.sql`) on the new passive side, without `ON CLUSTER`;
-   - change the Helm `networkPolicy.egress.drReplicas`.
+   - change the Helm `networkPolicy.egress.drReplicas` (ClickHouse and Keeper ports).
 
    Validate before deploying:
    ```bash
@@ -111,6 +117,48 @@ The guard cannot assess at least one DR host, so it fails closed and nothing rea
 - **Credentials.** The guard password secret.
 
 The guard page (`/#/guard` or `GET /api/v1/guard`) shows each host's level and reason.
+
+With `fail_closed_scope: replica` an UNKNOWN replica only stops reads from itself; the alert still
+fires so that it is looked at. An unreachable **DR Keeper** (`KEEPER_UNREACHABLE`) stops every read
+whatever the scope: check `echo mntr | nc <dr-host> 9181` from a pod, and that the Keeper's
+`four_letter_word_white_list` includes `mntr` (it does by default).
+
+---
+
+## DR Keeper slow (`ChreplKeeperUnhealthy`)
+
+A DR Keeper is above `guard.thresholds.keeper` (`KEEPER_LATENCY`, `KEEPER_OUTSTANDING`) or
+unreachable, so every read waits. The DR replicas depend on these Keepers; production does not
+(DR Keepers are learners). Look at the "DR Keeper" panels on the dashboard and at the Keeper logs
+on the DR machines. Reads resume by themselves once the Keeper has been quiet for `stable_window`.
+Do not raise the thresholds to push copies through.
+
+---
+
+## DR replica maintenance (one of several DR replicas)
+
+With `fail_closed_scope: replica`, nothing needs to be done in the tool: while the replica is down
+or catching up it is UNKNOWN or RED, serves no reads, and reads continue on the other DR replicas.
+Reads that were running on it are pre-empted and retried elsewhere. With `cluster` or `shard`
+scope, pause first (see above) or expect copies to wait.
+
+If the replica's machine also runs a DR Keeper, every read stops while that Keeper is down
+(fail closed). For planned work, either accept the wait, or remove the Keeper host from
+`sources.dr.keeper.hosts` for the window (a reviewed config change and restart) and add it back
+afterwards.
+
+Taking a DR replica out for good: remove it from `sources.dr.shards[*].replicas` (and its Keeper
+from `keeper.hosts`) and from the Helm egress policy, then restart.
+
+---
+
+## A non-production replica is down
+
+Each target shard writes through its first replica that answers; when it is down the next one
+takes over within 10 s, and ReplicatedMergeTree brings the returning replica up to date. Nothing
+to do in the tool. If a table was first created while the replica was down, the replica gets it
+at the next copy to that target. If **every** replica of a target shard is down, jobs for that
+target fail with "no writable replica of target shard N" and can be resubmitted.
 
 ---
 

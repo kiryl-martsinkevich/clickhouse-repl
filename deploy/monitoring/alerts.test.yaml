@@ -8,6 +8,8 @@ tests:
         values: '0 0 1 1 1'
       - series: 'chrepl_guard_cluster_state'
         values: '0 0 4 4 4'
+      - series: 'chrepl_keeper_state{host="ch-dr-2.dc-dr.internal:9181"}'
+        values: '0 2 2 2 2 2 2 2'
       - series: 'chrepl_continuous_alerting{name="trades-to-qa1",table="trading.trades",target="qa1"}'
         values: '0 1 1 1 1'
     alert_rule_test:
@@ -28,11 +30,23 @@ tests:
             exp_annotations:
               summary: DR may be active - replication is stopped
               description: >-
-                Foreign activity on DR or the operator failover flag. No reads run until an operator
+                Foreign activity on DR, a DR Keeper leading, or the operator failover flag. No reads run until an operator
                 clears the flag (docs/runbook.md, "DC failover").
       - eval_time: 1m
         alertname: ChreplDrActive
         exp_alerts: []
+      - eval_time: 3m
+        alertname: ChreplKeeperUnhealthy
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: ChreplKeeperUnhealthy
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: A DR Keeper node is slow or unreachable - all reads wait
+              description: >-
+                A DR Keeper of the shared prod+DR ensemble is above guard.thresholds.keeper or cannot be
+                polled; reads are blocked until it is quiet again (docs/runbook.md, "DR Keeper slow").
       - eval_time: 2m
         alertname: ChreplContinuousLag
         exp_alerts:

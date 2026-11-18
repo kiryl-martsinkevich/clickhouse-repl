@@ -91,6 +91,16 @@ data class GuardStatus(
     val replicaDelaySeconds: Long? = null,
     /** Replication signals of each host's latest successful sample (metrics). */
     val hostSignals: Map<String, HostSignals> = emptyMap(),
+    /** DR Keeper nodes, when configured (`sources.*.keeper`). */
+    val keepers: Map<String, KeeperStatus> = emptyMap(),
+)
+
+data class KeeperStatus(
+    val level: GuardLevel,
+    /** `zk_server_state` of the latest successful poll. */
+    val state: String?,
+    val avgLatencyMs: Double?,
+    val outstandingRequests: Long?,
 )
 
 data class HostSignals(
@@ -99,10 +109,11 @@ data class HostSignals(
 )
 
 /**
- * The Source Guard (SPEC §4). Polls every DR host, computes a level per host and for the cluster,
- * hands out read permits only while everything is GREEN, and pre-empts running reads as soon as
- * that stops being true. Fails closed: unknown means RED. [tick] does one poll round; [start]
- * runs it every `poll_interval` on a daemon thread.
+ * The Source Guard (SPEC §4). Polls every DR replica (and DR Keeper node, when configured),
+ * computes a level per host and for the cluster, hands out read permits only for hosts that are
+ * admissible under `fail_closed_scope`, and pre-empts running reads as soon as that stops being
+ * true. Fails closed: unknown means RED. [tick] does one poll round; [start] runs it every
+ * `poll_interval` on a daemon thread.
  */
 class SourceGuard(
     private val config: Guard,
@@ -111,8 +122,20 @@ class SourceGuard(
     private val flags: OpsFlags = InMemoryOpsFlags(),
     private val killer: Killer? = null,
     private val clock: Clock = Clock.systemUTC(),
+    private val keeperSignals: KeeperSource? = source.keeper?.let { MntrKeeperSource(it.tls) },
 ) : AutoCloseable {
-    private val hosts = source.shards.map { hostKey(it.host, source.tls) }
+    private val hosts = source.shards.flatMap { shard -> shard.hosts.map { hostKey(it, source.tls) } }
+    private val shardHosts: Map<String, Set<String>> =
+        source.shards
+            .flatMap { shard ->
+                val keys = shard.hosts.map { hostKey(it, source.tls) }.toSet()
+                keys.map { it to keys }
+            }.toMap()
+    private val keeperHosts =
+        source.keeper
+            ?.hosts
+            .orEmpty()
+            .map { keeperKey(it, source.keeper!!.tls) }
     private val allowedUsers = setOf(source.reader.user, source.guard.user) + source.dcRoleCheck.ignoredUsers
     private val evaluator = Evaluator(config.thresholds)
     private val blackouts = config.blackoutWindows.map { Triple(CronExpression.parse(it.cron), it.duration.value, ZoneId.of(it.timezone)) }
@@ -121,11 +144,18 @@ class SourceGuard(
     private val lock = ReentrantLock()
     private val changed = lock.newCondition()
     private val states = hosts.associateWith { HostState(it) }
+    private val keeperStates = keeperHosts.associateWith { KeeperState(it) }
     private var clusterReasons: List<Reason> = listOf(Reason("STARTING", null, "waiting for the first poll"))
     private val permits = mutableListOf<Permit>()
     private val preemptions = ArrayDeque<Instant>()
     private var breakerOpenUntil: Instant? = null
-    private val pool = Executors.newFixedThreadPool(hosts.size.coerceAtLeast(1)) { r -> Thread(r, "guard-poll").apply { isDaemon = true } }
+    private val pool =
+        Executors.newFixedThreadPool((hosts.size + keeperHosts.size).coerceAtLeast(1)) { r ->
+            Thread(r, "guard-poll").apply {
+                isDaemon =
+                    true
+            }
+        }
 
     @Volatile private var running = false
     private var loop: Thread? = null
@@ -137,6 +167,16 @@ class SourceGuard(
         var reasons: List<Reason> = listOf(Reason("STARTING", host, "waiting for the first poll"))
         var cleanSince: Instant? = null
         var last: HostSample? = null
+        var lastOk: Instant? = null
+    }
+
+    private class KeeperState(
+        host: String,
+    ) {
+        var level = GuardLevel.UNKNOWN
+        var reasons: List<Reason> = listOf(Reason("STARTING", host, "waiting for the first Keeper poll"))
+        var cleanSince: Instant? = null
+        var last: KeeperSample? = null
         var lastOk: Instant? = null
     }
 
@@ -170,16 +210,24 @@ class SourceGuard(
                 .toMillis()
                 .coerceAtLeast(1_000)
         val futures = hosts.map { h -> h to pool.submit(Callable { signals.sample(h) }) }
+        val keeperFutures = keeperSignals?.let { k -> keeperHosts.map { h -> h to pool.submit(Callable { k.sample(h) }) } }.orEmpty()
         val samples =
             futures.map { (h, f) ->
                 runCatching { f.get(timeout, TimeUnit.MILLISECONDS) }
                     .getOrElse { HostSample(h, clock.instant(), error = "poll timed out") }
             }
+        val keeperSamples =
+            keeperFutures.map { (h, f) ->
+                runCatching { f.get(timeout, TimeUnit.MILLISECONDS) }
+                    .getOrElse { KeeperSample(h, clock.instant(), error = "poll timed out") }
+            }
         lock.withLock {
             val now = clock.instant()
             for (sample in samples) update(states.getValue(sample.host), sample, now)
+            for (sample in keeperSamples) updateKeeper(keeperStates.getValue(sample.host), sample, now)
             ageStale(now)
-            clusterReasons = clusterControls(now)
+            clusterReasons =
+                clusterControls(now).ifEmpty { keeperStates.values.filter { it.level != GuardLevel.GREEN }.flatMap { it.reasons } }
             preemptIfNeeded(now)
             changed.signalAll()
         }
@@ -243,6 +291,87 @@ class SourceGuard(
         }
     }
 
+    /**
+     * DR Keeper nodes count for the whole cluster: every DR replica depends on them, so a slow or
+     * unreachable DR Keeper blocks all reads until it is quiet for `stable_window`. A learner reports
+     * `standalone` or `follower`; only `leader` means anything (DR_ACTIVE).
+     */
+    private fun updateKeeper(
+        state: KeeperState,
+        sample: KeeperSample,
+        now: Instant,
+    ) {
+        if (sample.ok) {
+            state.last = sample
+            state.lastOk = now
+        }
+        val limits = config.thresholds.keeper
+        val maxLatency =
+            limits.maxAvgLatency.value
+                .toMillis()
+                .toDouble()
+
+        fun breaches(scale: Double) =
+            buildList {
+                if (sample.avgLatencyMs > maxLatency * scale) {
+                    add(
+                        Reason(
+                            "KEEPER_LATENCY",
+                            sample.host,
+                            "Keeper average latency ${sample.avgLatencyMs} ms (threshold ${limits.maxAvgLatency})",
+                        ),
+                    )
+                }
+                if (sample.outstandingRequests > limits.maxOutstandingRequests * scale) {
+                    add(
+                        Reason(
+                            "KEEPER_OUTSTANDING",
+                            sample.host,
+                            "${sample.outstandingRequests} outstanding Keeper requests (threshold ${limits.maxOutstandingRequests})",
+                        ),
+                    )
+                }
+            }
+        if (!sample.ok) {
+            state.level = GuardLevel.UNKNOWN
+            state.reasons = listOf(Reason("KEEPER_UNREACHABLE", sample.host, "cannot poll Keeper: ${sample.error}"))
+            state.cleanSince = null
+            return
+        }
+        if (sample.state == "leader" && source.keeper?.leaderMeansActive == true) {
+            flags.setFailover(Reason("DR_ACTIVE", sample.host, "a DR Keeper node is the Raft leader — DR may be active"))
+        }
+        val hard = breaches(1.0)
+        val near = breaches(config.releaseRatio)
+        when {
+            hard.isNotEmpty() -> {
+                state.level = GuardLevel.RED
+                state.reasons = hard
+                state.cleanSince = null
+            }
+
+            near.isNotEmpty() -> {
+                state.level = GuardLevel.AMBER
+                state.reasons = near.map { it.copy(message = "close to limit: ${it.message}") }
+                state.cleanSince = null
+            }
+
+            else -> {
+                val since = state.cleanSince ?: now.also { state.cleanSince = it }
+                val stable = Duration.between(since, now) >= config.stableWindow.value
+                state.level = if (stable) GuardLevel.GREEN else GuardLevel.AMBER
+                state.reasons =
+                    if (stable) {
+                        emptyList()
+                    } else {
+                        listOf(
+                            Reason("STABILISING", sample.host, "Keeper quiet for ${Duration.between(since, now).seconds} s"),
+                        )
+                    }
+            }
+        }
+    }
+
     private fun unknown(
         state: HostState,
         reason: Reason,
@@ -257,6 +386,14 @@ class SourceGuard(
             val lastOk = state.lastOk
             if (state.level != GuardLevel.UNKNOWN && (lastOk == null || Duration.between(lastOk, now) > config.staleAfter.value)) {
                 unknown(state, Reason("STALE", host, "no successful poll for ${config.staleAfter}"))
+            }
+        }
+        for ((host, state) in keeperStates) {
+            val lastOk = state.lastOk
+            if (state.level != GuardLevel.UNKNOWN && (lastOk == null || Duration.between(lastOk, now) > config.staleAfter.value)) {
+                state.level = GuardLevel.UNKNOWN
+                state.reasons = listOf(Reason("STALE", host, "no successful Keeper poll for ${config.staleAfter}"))
+                state.cleanSince = null
             }
         }
     }
@@ -308,23 +445,67 @@ class SourceGuard(
         when {
             flags.failover != null -> GuardLevel.DR_ACTIVE
             clusterReasons.isNotEmpty() -> GuardLevel.RED
-            else ->
-                states.values.map { it.level }.let { levels ->
-                    when {
-                        levels.any { it == GuardLevel.UNKNOWN } -> GuardLevel.UNKNOWN
-                        levels.any { it == GuardLevel.RED } -> GuardLevel.RED
-                        levels.any { it == GuardLevel.AMBER } -> GuardLevel.AMBER
-                        else -> GuardLevel.GREEN
-                    }
-                }
+            // With fail_closed_scope: replica a shard is as good as its best replica; otherwise as its worst host.
+            source.failClosedScope == FailClosedScope.REPLICA ->
+                worst(
+                    source.shards.map { shard ->
+                        shard.hosts.mapNotNull { states[hostKey(it, source.tls)]?.level }.minByOrNull { severity(it) } ?: GuardLevel.UNKNOWN
+                    },
+                )
+
+            else -> worst(states.values.map { it.level })
         }
+
+    private fun severity(level: GuardLevel) =
+        when (level) {
+            GuardLevel.GREEN -> 0
+            GuardLevel.AMBER -> 1
+            GuardLevel.RED -> 2
+            GuardLevel.UNKNOWN -> 3
+            GuardLevel.DR_ACTIVE -> 4
+        }
+
+    private fun worst(levels: List<GuardLevel>): GuardLevel = levels.maxByOrNull { severity(it) } ?: GuardLevel.UNKNOWN
 
     /** Reasons a read on [host] may not run now; empty means admitted (tokens aside). */
     private fun blockers(host: String): List<Reason> {
         if (clusterReasons.isNotEmpty()) return clusterReasons
-        val relevant = if (source.failClosedScope == FailClosedScope.CLUSTER) states.keys else setOf(host)
+        val relevant =
+            when (source.failClosedScope) {
+                FailClosedScope.CLUSTER -> states.keys
+                FailClosedScope.SHARD -> shardHosts[host] ?: setOf(host)
+                FailClosedScope.REPLICA -> setOf(host)
+            }
         return relevant.mapNotNull { states[it] }.filter { it.level != GuardLevel.GREEN }.flatMap { it.reasons }
     }
+
+    /** Whether a read on [host] would be admitted now, concurrency limits included. */
+    fun admissible(host: String): Boolean = lock.withLock { blockers(host).isEmpty() && tokenBlocker(host) == null }
+
+    /**
+     * [candidates] (replicas of one shard) best first: admissible ones, then by level (GREEN before
+     * AMBER before RED), then by fewest running reads. Unknown hosts keep their place at the end.
+     */
+    fun preferred(candidates: List<String>): List<String> =
+        lock.withLock {
+            candidates.sortedWith(
+                compareBy<String>(
+                    { if (it in states && blockers(it).isEmpty() && tokenBlocker(it) == null) 0 else 1 },
+                    { states[it]?.level?.let(::severity) ?: Int.MAX_VALUE },
+                    { h -> permits.count { it.host == h } },
+                ),
+            )
+        }
+
+    /** Why none of [candidates] can be read from now (empty when one can). */
+    fun waitReasons(candidates: List<String>): List<Reason> =
+        lock.withLock {
+            if (candidates.any { blockers(it).isEmpty() && tokenBlocker(it) == null }) {
+                emptyList()
+            } else {
+                candidates.flatMap { h -> blockers(h).ifEmpty { listOfNotNull(tokenBlocker(h)) } }.distinct()
+            }
+        }
 
     private fun tokenBlocker(host: String): Reason? {
         if (permits.size >=
@@ -346,12 +527,21 @@ class SourceGuard(
         queryId: String,
         maxWait: Duration = Duration.ofDays(1),
         onWait: (List<Reason>) -> Unit = {},
+    ): Permit = acquireAny(listOf(host), queryId, maxWait, onWait)
+
+    /** Blocks until a read on any of [candidates] (replicas of one shard) is admitted; prefers the healthiest, least busy one. */
+    fun acquireAny(
+        candidates: List<String>,
+        queryId: String,
+        maxWait: Duration = Duration.ofDays(1),
+        onWait: (List<Reason>) -> Unit = {},
     ): Permit {
-        require(host in states) { "unknown source host $host" }
+        require(candidates.isNotEmpty() && candidates.all { it in states }) { "unknown source host in $candidates" }
         val deadline = System.nanoTime() + maxWait.toNanos()
         lock.withLock {
             var reported: List<Reason>? = null
             while (true) {
+                val host = preferred(candidates).first()
                 val blocked = blockers(host).ifEmpty { listOfNotNull(tokenBlocker(host)) }
                 if (blocked.isEmpty()) {
                     val permit = Permit(host, queryId, Cancellation())
@@ -425,7 +615,11 @@ class SourceGuard(
                     .mapNotNull { (host, s) ->
                         s.last?.takeIf { it.ok }?.let { host to HostSignals(it.replicaDelaySeconds, it.queueSize) }
                     }.toMap()
-            GuardStatus(level, states.mapValues { it.value.level }, reasons, permits.size, delay, signals)
+            val keepers =
+                keeperStates.mapValues { (_, k) ->
+                    KeeperStatus(k.level, k.last?.state, k.last?.avgLatencyMs, k.last?.outstandingRequests)
+                }
+            GuardStatus(level, states.mapValues { it.value.level }, reasons, permits.size, delay, signals, keepers)
         }
 
     override fun close() {
