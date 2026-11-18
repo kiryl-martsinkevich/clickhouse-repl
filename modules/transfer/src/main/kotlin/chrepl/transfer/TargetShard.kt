@@ -18,6 +18,13 @@ class TargetShard(
     val index: Int,
     val replicas: List<ClickHouseClient>,
     private val probeTtl: Duration = Duration.ofSeconds(10),
+    /**
+     * How long to keep probing when no replica is writable. Replicas are read-only for a few
+     * seconds while the target's Keeper ensemble elects a new leader (e.g. its leader's machine went
+     * down); that must not fail the job.
+     */
+    private val writerWait: Duration = Duration.ofSeconds(30),
+    private val reprobeEvery: Duration = Duration.ofSeconds(2),
 ) {
     @Volatile private var cached: ClickHouseClient? = null
 
@@ -26,17 +33,25 @@ class TargetShard(
     fun writer(): ClickHouseClient {
         if (replicas.size == 1) return replicas.single()
         cached?.let { if (System.nanoTime() - cachedAt < probeTtl.toNanos()) return it }
-        val problems = mutableListOf<String>()
-        for (replica in replicas) {
-            val problem = probe(replica)
-            if (problem == null) {
-                cached = replica
-                cachedAt = System.nanoTime()
-                return replica
+        val deadline = System.nanoTime() + writerWait.toNanos()
+        while (true) {
+            val problems = mutableListOf<String>()
+            for (replica in replicas) {
+                val problem = probe(replica)
+                if (problem == null) {
+                    cached = replica
+                    cachedAt = System.nanoTime()
+                    return replica
+                }
+                problems += "${replica.endpoint}: $problem"
             }
-            problems += "${replica.endpoint}: $problem"
+            if (System.nanoTime() >= deadline) {
+                throw TargetUnavailableException(
+                    "no writable replica of target shard ${index + 1} within $writerWait: ${problems.joinToString("; ")}",
+                )
+            }
+            Thread.sleep(reprobeEvery.toMillis())
         }
-        throw TargetUnavailableException("no writable replica of target shard ${index + 1}: ${problems.joinToString("; ")}")
     }
 
     /** Replicas that answer now (all of them for a single-replica shard, which is never probed). */

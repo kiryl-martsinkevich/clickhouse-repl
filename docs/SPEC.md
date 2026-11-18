@@ -558,7 +558,10 @@ Keeper path (`{database}` and `{table}` are filled in; `{shard}` and `{replica}`
   has no read-only replicated table (a lost Keeper session). Staging tables (never replicated),
   `REPLACE PARTITION` and the `repl_meta` writes go to the writer; ReplicatedMergeTree carries the
   result to the other replicas. The choice is re-checked every 10 s, so the writer fails over
-  when a replica goes down. Staging tables left on a former writer are dropped by job cleanup
+  when a replica goes down. When no replica is writable (all read-only while the target's Keeper
+  ensemble elects a new leader), the probe is repeated every 2 s for up to 30 s before the job
+  fails. Found in `ClusterIT` on 26.8: stopping the node that held the Keeper leader made the
+  other replicas read-only for a few seconds. Staging tables left on a former writer are dropped by job cleanup
   on every replica, and a partition whose chunk stagings are missing is copied again (§5.4).
 - **DDL on every replica**: `CREATE TABLE` is not replicated, so the tool creates each table
   (and each view and its `TO` table) on every reachable replica from the writer's own

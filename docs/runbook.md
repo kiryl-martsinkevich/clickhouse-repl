@@ -155,7 +155,8 @@ from `keeper.hosts`) and from the Helm egress policy, then restart.
 ## A non-production replica is down
 
 Each target shard writes through its first replica that answers; when it is down the next one
-takes over within 10 s, and ReplicatedMergeTree brings the returning replica up to date. Nothing
+takes over within 10 s (up to 30 s more if the remaining replicas are read-only while the target's
+Keepers elect a new leader), and ReplicatedMergeTree brings the returning replica up to date. Nothing
 to do in the tool. If a table was first created while the replica was down, the replica gets it
 at the next copy to that target. If **every** replica of a target shard is down, jobs for that
 target fail with "no writable replica of target shard N" and can be resubmitted.

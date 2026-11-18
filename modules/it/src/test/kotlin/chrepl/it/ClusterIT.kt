@@ -162,7 +162,11 @@ class ClusterIT {
         try {
             repeat(5) { i -> topology.insertOnProd("2026-11-0${1 + i}", days = 1, rows = 10, idOffset = 50_000_000L + i * 100) }
             await("dr1 RED") { guard.status().hosts[lagging.hostPort] == GuardLevel.RED }
-            assertEquals(GuardLevel.GREEN, guard.status().level, "the shard still has GREEN replicas")
+            // The other replicas fetch the same inserts first, so they pass through AMBER before settling.
+            await("the shard GREEN through the other replicas while dr1 stays RED") {
+                val status = guard.status()
+                status.level == GuardLevel.GREEN && status.hosts[lagging.hostPort] == GuardLevel.RED
+            }
             val job = runJob(LocalDate.of(2026, 10, 2))
             topology.dr.forEach { it.sql("SYSTEM FLUSH LOGS") }
             val reads =
