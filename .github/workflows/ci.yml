@@ -1,8 +1,15 @@
 name: CI
 
+# Pushes to main, plus pull requests: a PR branch runs once (as the PR), not twice.
 on:
   push:
+    branches: [main]
   pull_request:
+
+# A newer push to a PR cancels that PR's run still in progress; runs on main always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

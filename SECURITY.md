@@ -15,8 +15,9 @@ known vulnerability:
 | Portal (npm) | OSV-Scanner on `package-lock.json` and `npm audit` | `modules/portal/package-lock.json` |
 | Container image | OSV-Scanner image scan of the built image | `Dockerfile` base image, pinned by digest |
 
-Dependabot (`.github/dependabot.yml`) proposes updates weekly for Gradle, npm, the Docker base
-image and GitHub Actions.
+Dependency updates are manual: there is no Dependabot configuration, to save Actions minutes. When
+the `security` job reports a finding, bump the version, refresh the lockfiles
+(`./gradlew resolveAndLockAll --write-locks`, `npm install` in `modules/portal`) and rescan.
 
 ### Results (2026-10-25)
 
