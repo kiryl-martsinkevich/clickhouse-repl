@@ -106,7 +106,7 @@ class ClickHouseNode(
     fun scalar(query: String): String = client().queryScalar(query) ?: ""
 
     override fun close() {
-        runCatching { Docker.run("rm", "-f", containerId) }
+        runCatching { Docker.run("rm", "-f", "-v", containerId) }
     }
 }
 
