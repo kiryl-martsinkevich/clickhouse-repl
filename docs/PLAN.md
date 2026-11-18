@@ -411,7 +411,7 @@ Delivered:
 - `ClusterIT` (9 ClickHouse containers + Postgres) and a 9-node demo (`demo/run.sh`), which
   triggers the copy with `curl POST /api/v1/jobs`.
 - Finding: with `can_become_leader=false` the DR Keepers are non-voting learners (prod writes
-  commit with all DR nodes stopped); they report `zk_server_state = standalone` on 25.8.
+  commit with all DR nodes stopped); they report `zk_server_state = standalone` on 25.8 and 26.8.
 
 Open:
 - Run against the real DR and nonprod clusters in staging: thresholds for Keeper latency, and the

@@ -434,7 +434,7 @@ DR Keeper above `guard.thresholds.keeper` (`max_avg_latency`, `max_outstanding_r
 unreachable, blocks **every** read until it has been quiet for `stable_window` (fail closed).
 A DR Keeper that reports itself **leader** can only mean the ensemble was reconfigured for a
 failover, so it raises `DR_ACTIVE` (`keeper.leader_means_active`, default on). Learners report
-`standalone` (ClickHouse 25.8) or `follower`; only `leader` is treated as a role change.
+`standalone` (ClickHouse 25.8 and 26.8) or `follower`; only `leader` is treated as a role change.
 
 **Topology test** (`ClusterIT`): 3 prod + 3 DR replicas with co-located Keepers (one ensemble,
 DR learners) and a 1 × 3 nonprod target with its own ensemble. It checks that the guard
